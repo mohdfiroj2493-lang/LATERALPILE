@@ -18,6 +18,48 @@ st.set_page_config(page_title="Pile Lateral Analysis", layout="wide")
 
 
 # ============================================================
+# DEFAULTS
+# ============================================================
+DEFAULT_SOIL_LAYERS = [
+    {
+        "name": "Loose sand",
+        "z_top": 0.0,
+        "z_bot": 6.0,
+        "soilType": 2,
+        "phi_deg": 30.0,
+        "gamma": 17000.0,
+        "k": 20000000.0,
+        "Cd": 0.1,
+    },
+    {
+        "name": "Soft clay",
+        "z_top": 6.0,
+        "z_bot": 14.0,
+        "soilType": 1,
+        "c": 25000.0,
+        "eps50": 0.02,
+        "gamma": 16500.0,
+        "Cd": 0.1,
+    },
+    {
+        "name": "Dense sand",
+        "z_top": 14.0,
+        "z_bot": 24.0,
+        "soilType": 2,
+        "phi_deg": 38.0,
+        "gamma": 19000.0,
+        "k": 40000000.0,
+        "Cd": 0.1,
+    },
+]
+
+LAYER_COLORS = {
+    1: "#b07d62",  # clay
+    2: "#d9c27a",  # sand
+}
+
+
+# ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 def depth_modifier_pu(z, layer):
@@ -43,14 +85,36 @@ def get_layer(z, soil_layers):
     raise ValueError(f"No soil layer defined for depth z = {z:.3f} m")
 
 
-def derive_py_params(layer, z, pile_diameter, tributary_len):
-    """
-    Convert c-type or phi-type soil inputs to PySimple1 inputs.
+def validate_soil_layers(soil_layers, pile_length):
+    if not soil_layers:
+        raise ValueError("At least one soil layer is required.")
 
-    Returns:
-        pult : ultimate spring force for the node [N]
-        y50  : displacement at 50% mobilization [m]
-    """
+    sorted_layers = sorted(soil_layers, key=lambda x: x["z_top"])
+
+    if abs(sorted_layers[0]["z_top"] - 0.0) > 1e-9:
+        raise ValueError("The first soil layer must start at z_top = 0.0 m.")
+
+    prev_bot = None
+    for i, layer in enumerate(sorted_layers, start=1):
+        if layer["z_bot"] <= layer["z_top"]:
+            raise ValueError(f"Layer {i} has z_bot <= z_top.")
+        if prev_bot is not None and abs(layer["z_top"] - prev_bot) > 1e-6:
+            raise ValueError("Soil layers must be continuous with no gap or overlap.")
+        if layer["soilType"] == 1 and "c" not in layer:
+            raise ValueError(f"Clay layer '{layer['name']}' requires c.")
+        if layer["soilType"] == 2 and "phi_deg" not in layer:
+            raise ValueError(f"Sand layer '{layer['name']}' requires phi_deg.")
+        if "gamma" not in layer:
+            raise ValueError(f"Layer '{layer['name']}' requires gamma.")
+        prev_bot = layer["z_bot"]
+
+    if abs(sorted_layers[-1]["z_bot"] - pile_length) > 1e-6:
+        raise ValueError("The last soil layer z_bot must match the pile length.")
+
+    return sorted_layers
+
+
+def derive_py_params(layer, z, pile_diameter, tributary_len):
     soil_type = layer["soilType"]
 
     if soil_type == 1:
@@ -115,7 +179,6 @@ def derive_py_params(layer, z, pile_diameter, tributary_len):
         else:
             Kqo = np.exp((pi/2.0 + phi) * np.tan(phi)) * np.cos(phi) * np.tan(pi/4.0 + phi/2.0) \
                 - np.exp(-(pi/2.0 - phi) * np.tan(phi)) * np.cos(phi) * np.tan(pi/4.0 - phi/2.0)
-            Kco = (1.0/np.tan(phi)) * (np.exp((pi/2.0 + phi) * np.tan(phi)) * np.cos(phi) * np.tan(pi/4.0 + phi/2.0) - 1.0)
             dcinf = 1.58 + 4.09 * (np.tan(phi) ** 4)
             Nc = (1.0/np.tan(phi)) * np.exp(pi * np.tan(phi)) * ((np.tan(pi/4.0 + phi/2.0) ** 2) - 1.0)
             Ko = 1.0 - np.sin(phi)
@@ -174,8 +237,8 @@ def build_model(config, soil_layers):
     n_node = n_ele + 1
     dz = pile_length / n_ele
 
-    A = np.pi * pile_diameter**2 / 4.0
-    I = np.pi * pile_diameter**4 / 64.0
+    area = np.pi * pile_diameter**2 / 4.0
+    inertia = np.pi * pile_diameter**4 / 64.0
 
     for i in range(n_node):
         node_tag = i + 1
@@ -199,7 +262,7 @@ def build_model(config, soil_layers):
 
     ops.geomTransf('Linear', 1)
     for e in range(1, n_node):
-        ops.element('elasticBeamColumn', e, e, e + 1, A, e_pile, I, 1)
+        ops.element('elasticBeamColumn', e, e, e + 1, area, e_pile, inertia, 1)
 
     spring_info = []
     mat_tag = 1000
@@ -310,9 +373,9 @@ def get_beam_force_profiles(config):
 
     for e in range(1, config["n_ele"] + 1):
         f = ops.eleForce(e)
-
         zt = (e - 1) * dz
         zb = e * dz
+
         m_t = f[2]
         m_b = -f[5]
         v_ele = -(m_b - m_t) / dz
@@ -465,49 +528,69 @@ def plot_moment_profile(force_data, title):
     return fig
 
 
+def plot_pile_soil_profile(depth, ux, soil_layers, pile_diameter, title):
+    fig, ax = plt.subplots(figsize=(6, 8))
+
+    max_disp = float(np.max(np.abs(ux))) if len(ux) else 0.0
+    scale = 1.0
+    if max_disp > 0:
+        scale = min(25.0, max(3.0, 0.25 * max(layer["z_bot"] for layer in soil_layers) / max_disp))
+
+    half_width = pile_diameter / 2.0
+    undeformed_x = np.zeros_like(depth)
+    deformed_x = ux * scale
+
+    for layer in soil_layers:
+        color = LAYER_COLORS.get(layer["soilType"], "#dddddd")
+        label = f"{layer['name']} ({'Clay' if layer['soilType']==1 else 'Sand'})"
+        ax.axhspan(layer["z_top"], layer["z_bot"], color=color, alpha=0.45, label=label)
+        ax.text(
+            1.15 * pile_diameter,
+            0.5 * (layer["z_top"] + layer["z_bot"]),
+            layer["name"],
+            va="center",
+            fontsize=9,
+        )
+
+    ax.plot(undeformed_x, depth, linestyle="--", linewidth=1.8, label="Pile centerline (undeformed)")
+    ax.plot(deformed_x, depth, linewidth=2.4, label=f"Pile centerline (deformed x{scale:.1f})")
+    ax.plot(np.full_like(depth, -half_width), depth, alpha=0.6, linewidth=1.0)
+    ax.plot(np.full_like(depth, half_width), depth, alpha=0.6, linewidth=1.0)
+
+    ax.scatter([deformed_x[0]], [depth[0]], marker=">", s=90, label="Loaded head")
+    ax.axhline(0.0, linewidth=1.2)
+    ax.invert_yaxis()
+    ax.set_xlabel("Horizontal position / deformed shape (m)")
+    ax.set_ylabel("Depth below ground surface (m)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+
+    handles, labels = ax.get_legend_handles_labels()
+    seen = set()
+    unique_h = []
+    unique_l = []
+    for h, l in zip(handles, labels):
+        if l not in seen:
+            unique_h.append(h)
+            unique_l.append(l)
+            seen.add(l)
+    ax.legend(unique_h, unique_l, loc="best", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
 # ============================================================
 # STREAMLIT UI
 # ============================================================
-DEFAULT_SOIL_JSON = """[
-  {
-    "name": "Loose sand",
-    "z_top": 0.0,
-    "z_bot": 6.0,
-    "soilType": 2,
-    "phi_deg": 30.0,
-    "gamma": 17000.0,
-    "k": 20000000.0,
-    "Cd": 0.1
-  },
-  {
-    "name": "Soft clay",
-    "z_top": 6.0,
-    "z_bot": 14.0,
-    "soilType": 1,
-    "c": 25000.0,
-    "eps50": 0.02,
-    "gamma": 16500.0,
-    "Cd": 0.1
-  },
-  {
-    "name": "Dense sand",
-    "z_top": 14.0,
-    "z_bot": 24.0,
-    "soilType": 2,
-    "phi_deg": 38.0,
-    "gamma": 19000.0,
-    "k": 40000000.0,
-    "Cd": 0.1
-  }
-]"""
-
-
 st.title("Pile Lateral Analysis with OpenSeesPy + Streamlit")
-st.caption("Nonlinear p-y springs using PySimple1, with free/fixed head and fixed/pinned base options.")
+st.caption("Nonlinear p-y springs using PySimple1, with GUI-based soil layers, force plots, and deformed pile profile.")
 
 if ops is None:
     st.error(f"OpenSeesPy could not be imported: {OPENSEES_IMPORT_ERROR}")
     st.stop()
+
+if "soil_layers" not in st.session_state:
+    st.session_state.soil_layers = [dict(layer) for layer in DEFAULT_SOIL_LAYERS]
 
 with st.sidebar:
     st.header("Model Inputs")
@@ -531,27 +614,104 @@ with st.sidebar:
     cd_default = st.number_input("Default Cd", value=0.1, step=0.05)
     spring_sign = st.number_input("Spring sign", value=1.0, step=1.0)
 
-    st.subheader("Soil Layers JSON")
-    soil_json = st.text_area(
-        "Edit the soil profile as JSON",
-        value=DEFAULT_SOIL_JSON,
-        height=360,
-    )
+st.subheader("Soil Layers")
+st.caption("Edit soil layers directly in the GUI. Keep layers continuous from 0 m to the pile tip.")
 
-    run_btn = st.button("Run analysis", type="primary")
+soil_layers = st.session_state.soil_layers
+soil_cols = st.columns([1, 1])
+with soil_cols[0]:
+    if st.button("Add sand layer"):
+        last_bot = soil_layers[-1]["z_bot"] if soil_layers else 0.0
+        soil_layers.append({
+            "name": f"Sand {len(soil_layers)+1}",
+            "z_top": last_bot,
+            "z_bot": last_bot + 1.0,
+            "soilType": 2,
+            "phi_deg": 30.0,
+            "gamma": 18000.0,
+            "k": 20000000.0,
+            "Cd": 0.1,
+        })
+with soil_cols[1]:
+    if st.button("Add clay layer"):
+        last_bot = soil_layers[-1]["z_bot"] if soil_layers else 0.0
+        soil_layers.append({
+            "name": f"Clay {len(soil_layers)+1}",
+            "z_top": last_bot,
+            "z_bot": last_bot + 1.0,
+            "soilType": 1,
+            "c": 25000.0,
+            "eps50": 0.02,
+            "gamma": 17000.0,
+            "Cd": 0.1,
+        })
+
+remove_index = None
+for i, layer in enumerate(soil_layers):
+    with st.expander(f"Layer {i+1}: {layer.get('name', 'Layer')}", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            layer["name"] = st.text_input("Name", value=layer.get("name", f"Layer {i+1}"), key=f"name_{i}")
+        with c2:
+            layer_type_label = st.selectbox(
+                "Type",
+                ["Sand", "Clay"],
+                index=0 if layer.get("soilType", 2) == 2 else 1,
+                key=f"type_{i}"
+            )
+            layer["soilType"] = 2 if layer_type_label == "Sand" else 1
+        with c3:
+            if len(soil_layers) > 1 and st.button("Delete layer", key=f"del_{i}"):
+                remove_index = i
+
+        c4, c5, c6, c7 = st.columns(4)
+        with c4:
+            layer["z_top"] = st.number_input("z_top (m)", value=float(layer.get("z_top", 0.0)), step=0.5, key=f"zt_{i}")
+        with c5:
+            layer["z_bot"] = st.number_input("z_bot (m)", value=float(layer.get("z_bot", 1.0)), step=0.5, key=f"zb_{i}")
+        with c6:
+            layer["gamma"] = st.number_input("gamma (N/m3)", value=float(layer.get("gamma", 18000.0)), step=500.0, key=f"ga_{i}")
+        with c7:
+            layer["Cd"] = st.number_input("Cd", value=float(layer.get("Cd", 0.1)), step=0.05, key=f"cd_{i}")
+
+        if layer["soilType"] == 2:
+            s1, s2 = st.columns(2)
+            with s1:
+                layer["phi_deg"] = st.number_input("phi (deg)", value=float(layer.get("phi_deg", 30.0)), step=1.0, key=f"phi_{i}")
+            with s2:
+                layer["k"] = st.number_input("k (N/m3)", value=float(layer.get("k", 2.0e7)), step=1.0e6, format="%.3e", key=f"k_{i}")
+            layer.pop("c", None)
+            layer.pop("eps50", None)
+        else:
+            s1, s2 = st.columns(2)
+            with s1:
+                layer["c"] = st.number_input("c (Pa)", value=float(layer.get("c", 25000.0)), step=1000.0, key=f"c_{i}")
+            with s2:
+                layer["eps50"] = st.number_input("eps50", value=float(layer.get("eps50", 0.02)), step=0.005, format="%.3f", key=f"eps_{i}")
+            layer.pop("phi_deg", None)
+            layer.pop("k", None)
+
+if remove_index is not None:
+    soil_layers.pop(remove_index)
+    st.session_state.soil_layers = soil_layers
+    st.rerun()
+
+st.code(json.dumps(soil_layers, indent=2), language="json")
+
+run_btn = st.button("Run analysis", type="primary")
 
 st.markdown(
     """
     **Layer rules**
     - `soilType = 1` for clay layers using `c` and optional `eps50`
     - `soilType = 2` for sand layers using `phi_deg` and `gamma`
+    - The last layer bottom depth must match the pile length
     - `pult` and `y50` are derived internally for PySimple1
     """
 )
 
 if run_btn:
     try:
-        soil_layers = json.loads(soil_json)
         config = {
             "head_condition": head_condition,
             "base_condition": base_condition,
@@ -567,7 +727,8 @@ if run_btn:
             "spring_sign": float(spring_sign),
         }
 
-        results = run_analysis(config, soil_layers)
+        clean_soil_layers = validate_soil_layers(soil_layers, float(pile_length))
+        results = run_analysis(config, clean_soil_layers)
         summary = results["summary"]
 
         col1, col2, col3, col4 = st.columns(4)
@@ -592,6 +753,15 @@ if run_btn:
             "Top moment (kN.m)": summary["top_moment_kNm"],
             "Bottom moment (kN.m)": summary["bottom_moment_kNm"],
         })
+
+        st.subheader("Pile and soil profile after full load")
+        st.pyplot(plot_pile_soil_profile(
+            results["depth"],
+            results["ux"],
+            clean_soil_layers,
+            float(pile_diameter),
+            f"Pile deformation within soil layers ({head_condition}-head, {base_condition}-base)"
+        ))
 
         c1, c2 = st.columns(2)
         with c1:
@@ -637,4 +807,4 @@ if run_btn:
     except Exception as e:
         st.exception(e)
 else:
-    st.info("Set the inputs in the sidebar and click **Run analysis**.")
+    st.info("Set the inputs, edit the soil layers in the GUI, and click Run analysis.")
