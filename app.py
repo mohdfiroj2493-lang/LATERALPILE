@@ -1,6 +1,4 @@
-import math
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -553,7 +551,7 @@ st.markdown(
 
 if run_btn:
     try:
-        soil_layers = pd.io.json.loads(soil_json)
+        soil_layers = json.loads(soil_json)
         config = {
             "head_condition": head_condition,
             "base_condition": base_condition,
