@@ -1,655 +1,508 @@
-import json
 import math
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
 
+try:
+    import openseespy.opensees as ops
+    OPENSEES_AVAILABLE = True
+except Exception:
+    OPENSEES_AVAILABLE = False
+
 # ============================================================
-# LPILE-STYLE LATERAL PILE APP
-# Finite-difference beam-column solution + manual-based p-y models
-# Based on the uploaded LPILE technical manual approach.
+# BNWF SINGLE PILE APP
+# Rebuilt from uploaded Tcl files:
+# - staticBNWFsingle.tcl
+# - get_pyParam.tcl
+# - get_tzParam.tcl
+# - get_qzParam.tcl
+# - elasticPileSection.tcl
 # ============================================================
 
-# ------------------------------------------------------------
-# Data structures
-# ------------------------------------------------------------
-@dataclass
-class PileInputs:
-    head_condition: str
-    base_condition: str
-    H: float
-    P: float
-    M: float
-    L: float
-    n_ele: int
-    D: float
-    E: float
+st.set_page_config(page_title="BNWF Single Pile", layout="wide")
+st.title("BNWF Single Pile Analysis")
 
 
-@dataclass
-class LayeredPoint:
-    z: float
-    layer: Dict
-    pu: float
-    y50: float
-    k_init: float
+# ============================================================
+# DEFAULTS FROM THE TCL MODEL
+# ============================================================
+DEFAULTS = {
+    "L1": 1.0,
+    "L2": 20.0,
+    "diameter": 1.0,
+    "nElePile": 84,
+    "gamma": 17.0,
+    "phi": 36.0,
+    "Gsoil": 150000.0,
+    "puSwitch": 1,
+    "kSwitch": 1,
+    "gwtSwitch": 1,
+    "head_load_x": 3500.0,
+    "load_steps": 201,
+    "load_increment": 0.05,
+    "pult_cd": 0.0,
+    "tz_cd": 0.0,
+    "qz_suction": 0.0,
+    "qz_cd": 0.0,
+    # elasticPileSection.tcl
+    "E": 25000000.0,
+    "A": 0.785,
+    "Iz": 0.049,
+    "Iy": 0.049,
+    "G": 9615385.0,
+    "J": 0.098,
+    "torsion_stiffness": 1.0e10,
+}
 
 
-# ------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
+# ============================================================
+# PARAMETER FUNCTIONS TRANSLATED FROM TCL
+# ============================================================
+def interp_piecewise(x: float, xs: List[float], ys: List[float], x_left=None, x_right=None) -> float:
+    if x <= xs[0]:
+        return ys[0] if x_left is None else x_left
+    if x >= xs[-1]:
+        return ys[-1] if x_right is None else x_right
+    return float(np.interp(x, xs, ys))
 
 
-def safe_float(v, default=0.0) -> float:
-    try:
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return default
-        return float(v)
-    except Exception:
-        return default
+def get_py_param(py_depth: float, gamma: float, phi_degree: float, b: float, p_ele_length: float,
+                 pu_switch: int, k_switch: int, gwt_switch: int) -> Tuple[float, float]:
+    pi = math.pi
+    phi = math.radians(phi_degree)
+    zb_ratio = py_depth / b if b > 0 else 0.0
 
+    if pu_switch == 1:
+        zb_vals = [
+            0.0000,0.1250,0.2500,0.3750,0.5000,0.6250,0.7500,0.8750,1.0000,1.1250,
+            1.2500,1.3750,1.5000,1.6250,1.7500,1.8750,2.0000,2.1250,2.2500,2.3750,
+            2.5000,2.6250,2.7500,2.8750,3.0000,3.1250,3.2500,3.3750,3.5000,3.6250,
+            3.7500,3.8750,4.0000,4.1250,4.2500,4.3750,4.5000,4.6250,4.7500,4.8750,5.0000
+        ]
+        A_vals = [
+            2.8460,2.7105,2.6242,2.5257,2.4271,2.3409,2.2546,2.1437,2.0575,1.9589,
+            1.8973,1.8111,1.7372,1.6632,1.5893,1.5277,1.4415,1.3799,1.3368,1.2690,
+            1.2074,1.1581,1.1211,1.0780,1.0349,1.0164,0.9979,0.9733,0.9610,0.9487,
+            0.9363,0.9117,0.8994,0.8994,0.8871,0.8871,0.8809,0.8809,0.8809,0.8809,0.8809
+        ]
+        A = 0.88 if zb_ratio >= 5.0 else float(np.interp(zb_ratio, zb_vals, A_vals))
 
-def get_pile_section(D: float, E: float) -> Tuple[float, float, float]:
-    A = math.pi * D**2 / 4.0
-    I = math.pi * D**4 / 64.0
-    EI = E * I
-    return A, I, EI
+        alpha = phi / 2.0
+        beta = pi / 4.0 + phi / 2.0
+        K0 = 0.4
+        Ka = math.tan(pi / 4.0 - phi / 2.0) ** 2
 
+        c1 = K0 * math.tan(phi) * math.sin(beta) / (math.tan(beta - phi) * math.cos(alpha))
+        c2 = math.tan(beta) / math.tan(beta - phi) * math.tan(beta) * math.tan(alpha)
+        c3 = K0 * math.tan(beta) * (math.tan(phi) * math.sin(beta) - math.tan(alpha))
+        c4 = math.tan(beta) / math.tan(beta - phi) - Ka
+        c5 = Ka * (math.tan(beta) ** 8 - 1.0)
+        c6 = K0 * math.tan(phi) * (math.tan(beta) ** 4)
 
-def validate_layers(layers: List[Dict], pile_length: float) -> List[str]:
-    errors = []
-    if not layers:
-        errors.append("At least one soil layer is required.")
-        return errors
+        pst = gamma * py_depth * (py_depth * (c1 + c2 + c3) + b * c4)
+        psd = b * gamma * py_depth * (c5 + c6)
 
-    prev_bot = None
-    for i, layer in enumerate(layers):
-        z_top = safe_float(layer.get("z_top"), None)
-        z_bot = safe_float(layer.get("z_bot"), None)
-        soil_type = int(safe_float(layer.get("soilType"), 0))
-
-        if z_top is None or z_bot is None:
-            errors.append(f"Layer {i+1}: z_top and z_bot are required.")
-            continue
-        if z_bot <= z_top:
-            errors.append(f"Layer {i+1}: z_bot must be greater than z_top.")
-        if prev_bot is not None and abs(z_top - prev_bot) > 1e-9:
-            errors.append(f"Layer {i+1}: z_top must equal previous z_bot.")
-        prev_bot = z_bot
-
-        if soil_type == 1:
-            if layer.get("c") is None:
-                errors.append(f"Layer {i+1}: clay layer requires c.")
-        elif soil_type == 2:
-            if layer.get("phi_deg") is None:
-                errors.append(f"Layer {i+1}: sand layer requires phi_deg.")
-            if layer.get("gamma") is None:
-                errors.append(f"Layer {i+1}: sand layer requires gamma.")
+        if pst <= psd:
+            pu = 0.01 if py_depth == 0 else A * pst
         else:
-            errors.append(f"Layer {i+1}: soilType must be 1 (clay) or 2 (sand).")
+            pu = A * psd
 
-    if abs(safe_float(layers[-1].get("z_bot"), -999.0) - pile_length) > 1e-9:
-        errors.append("The bottom of the last layer must equal the pile length.")
-    return errors
+        pult = pu * p_ele_length
 
-
-def get_layer_at_depth(layers: List[Dict], z: float) -> Dict:
-    for layer in layers:
-        if safe_float(layer["z_top"]) - 1e-12 <= z <= safe_float(layer["z_bot"]) + 1e-12:
-            return layer
-    return layers[-1]
-
-
-def build_layer_table(layers: List[Dict]) -> pd.DataFrame:
-    rows = []
-    for layer in layers:
-        rows.append(
-            {
-                "name": layer.get("name", "Layer"),
-                "z_top": safe_float(layer.get("z_top")),
-                "z_bot": safe_float(layer.get("z_bot")),
-                "gamma": layer.get("gamma"),
-                "Cd": layer.get("Cd"),
-                "soilType": int(safe_float(layer.get("soilType"), 0)),
-                "phi_deg": layer.get("phi_deg"),
-                "k": layer.get("k"),
-                "c": layer.get("c"),
-                "eps50": layer.get("eps50"),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-# ------------------------------------------------------------
-# p-y models from the manual
-# ------------------------------------------------------------
-def api_sand_coefficients(phi_deg: float) -> Tuple[float, float, float, float, float, float]:
-    phi = math.radians(phi_deg)
-    alpha = phi / 2.0
-    beta = math.radians(45.0) + phi / 2.0
-    K0 = 0.4
-    KA = math.tan(math.radians(45.0) - phi / 2.0) ** 2
-    KP = math.tan(math.radians(45.0) + phi / 2.0) ** 2
-    C1 = KP - KA
-    C2 = KP - KA
-    C3 = KP * KP + K0 * math.tan(phi)
-    return alpha, beta, K0, KA, C1, C2, C3
-
-
-def api_sand_pu(z: float, D: float, gamma_eff: float, phi_deg: float) -> float:
-    # Manual API sand: use shallow/deep ultimate resistance, take smaller.
-    # Equations align with manual Sec. 3.4.3.
-    _, _, _, _, C1, C2, C3 = api_sand_coefficients(phi_deg)
-    z = max(z, 1e-6)
-    pus = (C1 * z + C2 * D) * gamma_eff * z
-    pud = C3 * D * gamma_eff * z
-    return max(min(pus, pud), 1.0)
-
-
-def api_sand_k(phi_deg: float, gamma_eff: float) -> float:
-    # Manual default trend from figure: fine sand above/below water.
-    # gamma_eff threshold follows earlier implementation convention.
-    if gamma_eff < 12225.0:
-        # below water table curve in MN/m3 converted to N/m3
-        p = phi_deg
-        k_mn = 0.0166 * p**3 - 1.5526 * p**2 + 58.43 * p - 769.18
     else:
-        p = phi_deg
-        k_mn = 0.4168 * p**2 - 8.1254 * p - 83.664
-    return max(k_mn, 5.0) * 1e6
+        Kqo = math.exp((pi / 2 + phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 + phi / 2) \
+            - math.exp(-(pi / 2 - phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 - phi / 2)
+        Kco = (1 / math.tan(phi)) * (
+            math.exp((pi / 2 + phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 + phi / 2) - 1
+        )
+        dcinf = 1.58 + 4.09 * (math.tan(phi) ** 4)
+        Nc = (1 / math.tan(phi)) * math.exp(pi * math.tan(phi)) * ((math.tan(pi / 4 + phi / 2) ** 2) - 1)
+        Ko = 1 - math.sin(phi)
+        Kcinf = Nc * dcinf
+        Kqinf = Kcinf * Ko * math.tan(phi)
+        aq = (Kqo / (Kqinf - Kqo)) * (Ko * math.sin(phi) / math.sin(pi / 4 + phi / 2))
+        KqD = (Kqo + Kqinf * aq * zb_ratio) / (1 + aq * zb_ratio)
+        pu = 0.01 if py_depth == 0 else gamma * py_depth * KqD * b
+        pult = pu * p_ele_length
+        A = 1.0
+
+    ph = [28.8,29.5,30.0,31.0,32.0,33.0,34.0,35.0,36.0,37.0,38.0,39.0,40.0]
+    if gwt_switch == 1:
+        ktab = [10,23,45,61,80,100,120,140,160,182,215,250,275]
+    else:
+        ktab = [10,20,33,42,50,60,70,85,95,107,122,141,155]
+
+    khat = interp_piecewise(phi_degree, ph, ktab, x_left=ktab[0], x_right=ktab[-1])
+    k_si = khat * 271.45
+
+    sigV = py_depth * gamma
+    if sigV == 0:
+        sigV = 0.01
+    if k_switch == 2:
+        c_sigma = (50 / sigV) ** 0.5
+        k_si = c_sigma * k_si
+
+    x = 0.5
+    atanh_value = 0.5 * math.log((1 + x) / (1 - x))
+    py_depth_eff = 0.01 if py_depth == 0.0 else py_depth
+    y50 = 0.5 * (pu / A) / (k_si * py_depth_eff) * atanh_value
+    return pult, y50
 
 
-def api_sand_p_y(y: float, z: float, D: float, gamma_eff: float, phi_deg: float, cyclic: bool = False) -> float:
-    pu = api_sand_pu(z, D, gamma_eff, phi_deg)
-    A = 0.9 if cyclic else max(0.9, 3.0 - 0.8 * z / max(D, 1e-9))
-    k = api_sand_k(phi_deg, gamma_eff)
-    arg = (k * z * y) / max(A * pu, 1e-12)
-    return A * pu * math.tanh(arg)
+def get_tz_param(phi: float, b: float, sigV: float, p_ele_length: float) -> Tuple[float, float]:
+    pi = math.pi
+    delta = 0.8 * phi * pi / 180.0
+    if sigV == 0.0:
+        sigV = 0.01
+    tu = 0.4 * sigV * pi * b * math.tan(delta)
+    tult = tu * p_ele_length
+
+    kf = [6000, 10000, 10000, 14000, 14000, 18000]
+    fric = [28, 31, 32, 34, 35, 38]
+    k = interp_piecewise(phi, fric, kf, x_left=kf[0], x_right=kf[-1])
+    k_si = k * 1.885
+    z50 = tult / k_si
+    return tult, z50
 
 
-def matlock_soft_clay_pu(z: float, D: float, c: float, gamma_eff: float, J: float = 0.5) -> float:
-    z = max(z, 1e-6)
-    pu1 = (3.0 + gamma_eff * z / max(c, 1e-9) + J * z / max(D, 1e-9)) * c * D
-    pu2 = 9.0 * c * D
-    return max(min(pu1, pu2), 1.0)
+def get_qz_param(phi_degree: float, b: float, sigV: float, G: float) -> Tuple[float, float]:
+    pi = math.pi
+    Ko = 1 - math.sin(math.radians(phi_degree))
+    phi = math.radians(phi_degree)
+    Ir = G / (sigV * math.tan(phi))
+    Nq = (1 + 2 * Ko) * (1 / (3 - math.sin(phi))) * math.exp(pi / 2 - phi) * (math.tan(pi / 4 + phi / 2) ** 2) \
+        * (Ir ** ((4 * math.sin(phi)) / (3 * (1 + math.sin(phi)))))
+    qu = Nq * sigV
+    qult = qu * pi * b**2 / 4
+    zc = 0.05 * b
+    z50 = 0.125 * zc
+    return qult, z50
 
 
-def matlock_soft_clay_y50(D: float, eps50: float) -> float:
-    return max(2.5 * eps50 * D, 1e-8)
+# ============================================================
+# BUILD MODEL FROM THE TCL LOGIC
+# ============================================================
+def build_bnwf_model(params: Dict[str, float]) -> Dict[str, int]:
+    ops.wipe()
 
+    L1 = params["L1"]
+    L2 = params["L2"]
+    diameter = params["diameter"]
+    nElePile = int(params["nElePile"])
+    eleSize = (L1 + L2) / nElePile
+    nNodePile = 1 + nElePile
+    gamma = params["gamma"]
+    phi = params["phi"]
+    Gsoil = params["Gsoil"]
+    puSwitch = int(params["puSwitch"])
+    kSwitch = int(params["kSwitch"])
+    gwtSwitch = int(params["gwtSwitch"])
 
-def matlock_soft_clay_p_y(y: float, z: float, D: float, c: float, gamma_eff: float, eps50: float, cyclic: bool = False) -> float:
-    pu = matlock_soft_clay_pu(z, D, c, gamma_eff)
-    y50 = matlock_soft_clay_y50(D, eps50)
-    if not cyclic:
-        if y <= 8.0 * y50:
-            return 0.5 * pu * (y / y50) ** (1.0 / 3.0)
-        return pu
+    # Spring nodes
+    ops.model("Basic", "-ndm", 3, "-ndf", 3)
+    count = 0
+    for i in range(1, nNodePile + 1):
+        zCoord = eleSize * (i - 1)
+        if zCoord <= L2 + 1e-12:
+            ops.node(i, 0.0, 0.0, zCoord)
+            ops.node(i + 100, 0.0, 0.0, zCoord)
+            count += 1
+    nNodeEmbed = count
 
-    xr = max(6.0 * c * D / max(gamma_eff * D + 1e-12, 1e-12), 2.5 * D)
-    if y <= 3.0 * y50:
-        return 0.5 * pu * (y / y50) ** (1.0 / 3.0)
-    p15 = 0.72 * pu * min(z / max(xr, 1e-9), 1.0)
-    if y <= 15.0 * y50:
-        return 0.72 * pu + (p15 - 0.72 * pu) * (y - 3.0 * y50) / (12.0 * y50)
-    return p15
+    for i in range(1, nNodeEmbed + 1):
+        ops.fix(i, 1, 1, 1)
+        ops.fix(i + 100, 0, 1, 1)
 
+    # Materials from Tcl procedures
+    for i in range(1, nNodeEmbed + 1):
+        pyDepth = L2 - eleSize * (i - 1)
+        pult, y50 = get_py_param(pyDepth, gamma, phi, diameter, eleSize, puSwitch, kSwitch, gwtSwitch)
+        ops.uniaxialMaterial("PySimple1", i, 2, pult, y50, params["pult_cd"])
 
-def stiff_clay_no_water_pu(z: float, D: float, c: float, gamma_eff: float) -> float:
-    pu1 = (3.0 + gamma_eff * z / max(c, 1e-9) + 0.5 * z / max(D, 1e-9)) * c * D
-    pu2 = 9.0 * c * D
-    return max(min(pu1, pu2), 1.0)
+    for i in range(2, nNodeEmbed + 1):
+        pyDepth = eleSize * (i - 1)
+        sigV = gamma * pyDepth
+        tult, z50 = get_tz_param(phi, diameter, sigV, eleSize)
+        ops.uniaxialMaterial("TzSimple1", i + 100, 2, tult, z50, params["tz_cd"])
 
+    sigVq = gamma * L2
+    qult, z50q = get_qz_param(phi, diameter, sigVq, Gsoil)
+    ops.uniaxialMaterial("QzSimple1", 101, 2, qult, z50q, params["qz_suction"], params["qz_cd"])
 
-def stiff_clay_no_water_p_y(y: float, z: float, D: float, c: float, gamma_eff: float, eps50: float, N_cycles: int = 1) -> float:
-    pu = stiff_clay_no_water_pu(z, D, c, gamma_eff)
-    y50 = max(2.5 * eps50 * D, 1e-8)
-    ys = y50 * (2.0 * y / max(y50, 1e-12)) ** 4 if y <= 16.0 * y50 else y
+    # zero-length spring elements
+    ops.element("zeroLength", 1001, 1, 101, "-mat", 1, 101, "-dir", 1, 3)
+    for i in range(2, nNodeEmbed + 1):
+        ops.element("zeroLength", i + 1000, i, i + 100, "-mat", i, i + 100, "-dir", 1, 3)
 
-    # Static inverse form from manual is represented here directly in p(y)
-    # using the equivalent closed relationship.
-    if N_cycles <= 1:
-        if y <= 16.0 * y50:
-            return 0.5 * pu * (y / y50) ** 0.25
-        return pu
+    # pile nodes
+    ops.model("Basic", "-ndm", 3, "-ndf", 6)
+    for i in range(1, nNodePile + 1):
+        zCoord = eleSize * (i - 1)
+        ops.node(i + 200, 0.0, 0.0, zCoord)
 
-    # Reese stiff clay without free water cyclic expansion
-    # Solve static p from y_c = y_s + y50*C*logN with C = 9.6 (p/pu)^4.
-    logN = math.log10(max(N_cycles, 1))
-    if y <= 0.0:
-        return 0.0
+    ops.geomTransf("Linear", 1, 0.0, -1.0, 0.0)
 
-    def f(r: float) -> float:
-        r = clamp(r, 0.0, 1.0)
-        ys_local = y50 * (2.0 * r) ** 4 if r <= 0.5 else 16.0 * y50 * r
-        return ys_local + y50 * 9.6 * (r ** 4) * logN - y
+    # exact Tcl pile restraints
+    ops.fix(200 + nNodePile, 0, 1, 0, 1, 0, 1)
+    for i in range(202, 200 + nNodePile):
+        ops.fix(i, 0, 1, 0, 1, 0, 1)
 
-    lo, hi = 0.0, 1.0
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        if f(mid) > 0.0:
-            hi = mid
-        else:
-            lo = mid
-    return 0.5 * (lo + hi) * pu
+    for i in range(1, nNodeEmbed + 1):
+        ops.equalDOF(i + 200, i + 100, 1, 3)
 
+    # elasticPileSection.tcl
+    ops.section("Elastic", 1, params["E"], params["A"], params["Iz"], params["Iy"], params["G"], params["J"])
+    ops.uniaxialMaterial("Elastic", 3000, params["torsion_stiffness"])
+    secTag3D = 3
+    ops.section("Aggregator", secTag3D, 3000, "T", "-section", 1)
 
-def stiff_clay_with_water_params(z: float, D: float, c: float, gamma_eff: float) -> Tuple[float, float, float, float]:
-    pct = 2.0 * c * D + gamma_eff * D * z + 2.83 * c * z
-    pcd = 11.0 * c * D
-    pc = min(pct, pcd)
-    As = 0.2 + 0.4 * math.tanh(0.62 * z / max(D, 1e-9))
-    Ac = 0.2 + 0.1 * math.tanh(1.5 * z / max(D, 1e-9))
-    return max(pc, 1.0), As, Ac, max(0.005 * D, 1e-8)
-
-
-def stiff_clay_with_water_p_y(y: float, z: float, D: float, c: float, gamma_eff: float, eps50: float, cyclic: bool = False) -> float:
-    pc, As, Ac, _ = stiff_clay_with_water_params(z, D, c, gamma_eff)
-    y50 = max(eps50 * D, 1e-8)
-
-    if not cyclic:
-        if y <= As * y50:
-            return 0.5 * pc * (y / y50) ** 0.5
-        if y <= 6.0 * As * y50:
-            term = ((y - As * y50) / max(As * y50, 1e-12))
-            return 0.5 * pc * (y / y50) ** 0.5 - 0.055 * pc * term ** 1.25
-        if y <= 18.0 * As * y50:
-            return pc * (0.5 * As) - 0.0625 * pc * ((y - 6.0 * As * y50) / max(y50, 1e-12))
-        return pc * (1.225 - 0.75 * As - 0.411 * As)
-
-    yp = 4.1 * Ac * y50
-    if y <= 0.45 * yp:
-        return Ac * pc * (1.0 - ((1.0 - y / max(0.45 * yp, 1e-12)) ** 2.5))
-    if y <= 1.8 * yp:
-        return Ac * pc * (0.936 - 0.085 * (y / max(y50, 1e-12)))
-    return Ac * pc * 0.102
-
-
-def compute_py_curve(layer: Dict, z: float, y: float) -> float:
-    soil_type = int(safe_float(layer.get("soilType"), 0))
-    gamma = safe_float(layer.get("gamma"), 17000.0)
-    model = str(layer.get("model", "default")).lower()
-    cyclic = bool(layer.get("cyclic", False))
-    D = safe_float(layer.get("pile_diameter_ref"), 1.0)
-
-    if soil_type == 2:
-        phi = safe_float(layer.get("phi_deg"), 35.0)
-        return api_sand_p_y(y, z, D, gamma, phi, cyclic=cyclic)
-
-    c = safe_float(layer.get("c"), 25000.0)
-    eps50 = safe_float(layer.get("eps50"), 0.02)
-    if model == "stiff_nowater":
-        N_cycles = int(safe_float(layer.get("N_cycles"), 1))
-        return stiff_clay_no_water_p_y(y, z, D, c, gamma, eps50, N_cycles=N_cycles)
-    if model == "stiff_water":
-        return stiff_clay_with_water_p_y(y, z, D, c, gamma, eps50, cyclic=cyclic)
-    return matlock_soft_clay_p_y(y, z, D, c, gamma, eps50, cyclic=cyclic)
-
-
-def compute_py_initial(layer: Dict, z: float, D: float) -> Tuple[float, float, float]:
-    soil_type = int(safe_float(layer.get("soilType"), 0))
-    gamma = safe_float(layer.get("gamma"), 17000.0)
-    if soil_type == 2:
-        phi = safe_float(layer.get("phi_deg"), 35.0)
-        pu = api_sand_pu(z, D, gamma, phi)
-        k_init = api_sand_k(phi, gamma) * max(z, 1e-6)
-        y50 = max(pu / max(k_init, 1e-12), 1e-8)
-        return pu, y50, k_init
-
-    c = safe_float(layer.get("c"), 25000.0)
-    eps50 = safe_float(layer.get("eps50"), 0.02)
-    model = str(layer.get("model", "default")).lower()
-    if model == "stiff_nowater":
-        pu = stiff_clay_no_water_pu(z, D, c, gamma)
-        y50 = max(2.5 * eps50 * D, 1e-8)
-        k_init = 0.5 * pu / max(y50, 1e-12)
-        return pu, y50, k_init
-    if model == "stiff_water":
-        pc, _, _, _ = stiff_clay_with_water_params(z, D, c, gamma)
-        y50 = max(eps50 * D, 1e-8)
-        k_init = 0.5 * pc / max(y50, 1e-12)
-        return pc, y50, k_init
-    pu = matlock_soft_clay_pu(z, D, c, gamma)
-    y50 = matlock_soft_clay_y50(D, eps50)
-    k_init = (0.5 * pu) / max(y50, 1e-12)
-    return pu, y50, k_init
-
-
-# ------------------------------------------------------------
-# Finite-difference solver (manual style)
-# ------------------------------------------------------------
-def build_initial_response(layers: List[Dict], pile: PileInputs) -> List[LayeredPoint]:
-    dz = pile.L / pile.n_ele
-    points: List[LayeredPoint] = []
-    for i in range(pile.n_ele + 1):
-        z = i * dz
-        layer = dict(get_layer_at_depth(layers, z))
-        layer["pile_diameter_ref"] = pile.D
-        pu, y50, k_init = compute_py_initial(layer, z, pile.D)
-        points.append(LayeredPoint(z=z, layer=layer, pu=pu, y50=y50, k_init=k_init))
-    return points
-
-
-def solve_beam_fd(pile: PileInputs, layers: List[Dict], max_iter: int = 80, tol: float = 1e-7) -> Dict[str, np.ndarray]:
-    # Manual finite-difference framework following Chapter 2 style.
-    n = pile.n_ele
-    dz = pile.L / n
-    m = n + 1
-    _, I, EI = get_pile_section(pile.D, pile.E)
-    z = np.linspace(0.0, pile.L, m)
-
-    # Initial linearized subgrade profile
-    response = build_initial_response(layers, pile)
-    ksec = np.array([max(p.k_init, 1.0) for p in response], dtype=float)
-    y = np.zeros(m, dtype=float)
-
-    # Iterative secant-stiffness method
-    for _ in range(max_iter):
-        K = np.zeros((m, m), dtype=float)
-        F = np.zeros(m, dtype=float)
-
-        # Interior nodes using EI y'''' + P y'' + p = 0, with p≈ksec*y
-        for i in range(2, m - 2):
-            K[i, i - 2] += EI / dz**4
-            K[i, i - 1] += -4.0 * EI / dz**4 + pile.P / dz**2
-            K[i, i] += 6.0 * EI / dz**4 - 2.0 * pile.P / dz**2 + ksec[i]
-            K[i, i + 1] += -4.0 * EI / dz**4 + pile.P / dz**2
-            K[i, i + 2] += EI / dz**4
-
-        # Head boundary conditions
-        if pile.head_condition == "free":
-            # M(0)=M_head, V(0)=H
-            K[0, 0] = 1.0
-            K[0, 1] = -2.0
-            K[0, 2] = 1.0
-            F[0] = pile.M * dz**2 / EI
-
-            K[1, 0] = -5.0
-            K[1, 1] = 18.0
-            K[1, 2] = -24.0
-            K[1, 3] = 14.0
-            K[1, 4] = -3.0
-            F[1] = 2.0 * pile.H * dz**3 / EI
-        else:
-            # fixed head: y'(0)=0 and V(0)=H
-            K[0, 0] = -3.0
-            K[0, 1] = 4.0
-            K[0, 2] = -1.0
-            F[0] = 0.0
-
-            K[1, 0] = -5.0
-            K[1, 1] = 18.0
-            K[1, 2] = -24.0
-            K[1, 3] = 14.0
-            K[1, 4] = -3.0
-            F[1] = 2.0 * pile.H * dz**3 / EI
-
-        # Base boundary conditions
-        if pile.base_condition == "fixed":
-            K[m - 2, m - 3] = 1.0
-            K[m - 2, m - 2] = -4.0
-            K[m - 2, m - 1] = 3.0
-            F[m - 2] = 0.0
-
-            K[m - 1, m - 3] = 1.0
-            K[m - 1, m - 2] = -2.0
-            K[m - 1, m - 1] = 1.0
-            F[m - 1] = 0.0
-        else:
-            # pinned/free rotation base with zero moment and zero shear
-            K[m - 2, m - 3] = 1.0
-            K[m - 2, m - 2] = -2.0
-            K[m - 2, m - 1] = 1.0
-            F[m - 2] = 0.0
-
-            K[m - 1, m - 5] = 3.0
-            K[m - 1, m - 4] = -14.0
-            K[m - 1, m - 3] = 24.0
-            K[m - 1, m - 2] = -18.0
-            K[m - 1, m - 1] = 5.0
-            F[m - 1] = 0.0
-
-        y_new = np.linalg.solve(K, F)
-
-        # Update secant stiffness from nonlinear p-y curves
-        ksec_new = np.zeros_like(ksec)
-        for i, zi in enumerate(z):
-            layer = dict(get_layer_at_depth(layers, zi))
-            layer["pile_diameter_ref"] = pile.D
-            yi = abs(y_new[i])
-            p = compute_py_curve(layer, zi, yi)
-            ksec_new[i] = max(p / max(yi, 1e-8), 1.0)
-
-        if np.max(np.abs(y_new - y)) < tol:
-            y = y_new
-            ksec = ksec_new
-            break
-
-        y = y_new
-        ksec = 0.5 * ksec + 0.5 * ksec_new
-
-    # Post-processing from beam relations in the manual
-    theta = np.zeros_like(y)
-    M = np.zeros_like(y)
-    V = np.zeros_like(y)
-    psoil = np.zeros_like(y)
-
-    for i in range(1, m - 1):
-        theta[i] = (y[i + 1] - y[i - 1]) / (2.0 * dz)
-        M[i] = EI * (y[i - 1] - 2.0 * y[i] + y[i + 1]) / dz**2
-    theta[0] = (-3.0 * y[0] + 4.0 * y[1] - y[2]) / (2.0 * dz)
-    theta[-1] = (3.0 * y[-1] - 4.0 * y[-2] + y[-3]) / (2.0 * dz)
-    M[0] = EI * (y[0] - 2.0 * y[1] + y[2]) / dz**2
-    M[-1] = EI * (y[-3] - 2.0 * y[-2] + y[-1]) / dz**2
-
-    for i in range(2, m - 2):
-        V[i] = EI * (-y[i - 2] + 2.0 * y[i - 1] - 2.0 * y[i + 1] + y[i + 2]) / (2.0 * dz**3) + pile.P * theta[i]
-        layer = dict(get_layer_at_depth(layers, z[i]))
-        layer["pile_diameter_ref"] = pile.D
-        psoil[i] = compute_py_curve(layer, z[i], abs(y[i]))
-    V[0] = pile.H
-    V[1] = V[2]
-    V[-1] = 0.0
-    V[-2] = V[-3]
-    psoil[0] = 0.0
-    psoil[1] = psoil[2]
-    psoil[-1] = psoil[-2]
+    for i in range(201, 200 + nElePile + 1):
+        ops.element("dispBeamColumn", i, i, i + 1, secTag3D, 3, 1)
 
     return {
-        "z": z,
-        "y": y,
-        "theta": theta,
-        "M": M,
-        "V": V,
-        "p": psoil,
-        "EI": np.full_like(z, EI),
-        "A": np.full_like(z, math.pi * pile.D**2 / 4.0),
-        "I": np.full_like(z, I),
+        "eleSize": eleSize,
+        "nNodePile": nNodePile,
+        "nNodeEmbed": nNodeEmbed,
+        "pileNodeStart": 201,
+        "pileNodeEnd": 200 + nNodePile,
+        "pileEleStart": 201,
+        "pileEleEnd": 200 + nElePile,
+        "headNode": 200 + nNodePile,
     }
 
 
-# ------------------------------------------------------------
-# Plotting
-# ------------------------------------------------------------
-def plot_profile_with_layers(results: Dict[str, np.ndarray], layers: List[Dict], pile: PileInputs):
-    fig, ax = plt.subplots(figsize=(6, 9))
-    for layer in layers:
-        zt = safe_float(layer["z_top"])
-        zb = safe_float(layer["z_bot"])
-        stype = int(safe_float(layer["soilType"], 0))
-        color = "#f4d03f" if stype == 2 else "#85c1e9"
-        ax.axhspan(zt, zb, color=color, alpha=0.35)
-        ax.text(0.02 * pile.D, 0.5 * (zt + zb), layer.get("name", "Layer"), va="center")
+# ============================================================
+# ANALYSIS
+# ============================================================
+def run_bnwf_analysis(params: Dict[str, float], info: Dict[str, int]) -> int:
+    ops.timeSeries("Path", 10, "-time", 0, 10, 20, 10000, "-values", 0, 0, 1, 1, "-factor", 1)
+    ops.pattern("Plain", 10, 10)
+    ops.load(info["headNode"], params["head_load_x"], 0.0, 0.0, 0.0, 0.0, 0.0)
 
-    scale = 1.0
-    ymax = np.max(np.abs(results["y"]))
-    if ymax > 1e-12:
-        scale = min(25.0, 0.25 * pile.L / ymax)
+    ops.integrator("LoadControl", params["load_increment"])
+    ops.numberer("RCM")
+    ops.system("SparseGeneral")
+    ops.constraints("Transformation")
+    ops.test("NormDispIncr", 1e-5, 20, 1)
+    ops.algorithm("Newton")
+    ops.analysis("Static")
 
-    x_def = results["y"] * scale
-    ax.plot(np.zeros_like(results["z"]), results["z"], "k--", lw=1)
-    ax.plot(x_def, results["z"], lw=2, label="Pile under full load")
+    return ops.analyze(int(params["load_steps"]))
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+def get_bnwf_results(info: Dict[str, int]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    pile_nodes = list(range(info["pileNodeStart"], info["pileNodeEnd"] + 1))
+    pile_eles = list(range(info["pileEleStart"], info["pileEleEnd"] + 1))
+    spring_nodes = list(range(1, info["nNodeEmbed"] + 1))
+
+    node_rows = []
+    for node in pile_nodes:
+        x, y, z = ops.nodeCoord(node)
+        d = ops.nodeDisp(node)
+        node_rows.append({
+            "node": node,
+            "x": x,
+            "y": y,
+            "z": z,
+            "ux": d[0],
+            "uy": d[1],
+            "uz": d[2],
+            "rx": d[3],
+            "ry": d[4],
+            "rz": d[5],
+        })
+    node_df = pd.DataFrame(node_rows)
+
+    reaction_rows = []
+    for node in spring_nodes:
+        r = ops.nodeReaction(node)
+        x, y, z = ops.nodeCoord(node)
+        reaction_rows.append({
+            "spring_node": node,
+            "z": z,
+            "Rx": r[0] if len(r) > 0 else 0.0,
+            "Ry": r[1] if len(r) > 1 else 0.0,
+            "Rz": r[2] if len(r) > 2 else 0.0,
+        })
+    reaction_df = pd.DataFrame(reaction_rows)
+
+    ele_rows = []
+    for ele in pile_eles:
+        f = ops.eleForce(ele)
+        ni = ele
+        nj = ele + 1
+        zi = ops.nodeCoord(ni)[2]
+        zj = ops.nodeCoord(nj)[2]
+        ele_rows.append({
+            "element": ele,
+            "zi": zi,
+            "zj": zj,
+            "P_i": f[0], "Vy_i": f[1], "Vz_i": f[2], "T_i": f[3], "My_i": f[4], "Mz_i": f[5],
+            "P_j": f[6], "Vy_j": f[7], "Vz_j": f[8], "T_j": f[9], "My_j": f[10], "Mz_j": f[11],
+        })
+    ele_df = pd.DataFrame(ele_rows)
+    return node_df, reaction_df, ele_df
+
+
+# ============================================================
+# PLOTS
+# ============================================================
+def plot_deformed_shape(node_df: pd.DataFrame, L2: float):
+    fig, ax = plt.subplots(figsize=(6, 8))
+    z = node_df["z"].values
+    ux = node_df["ux"].values
+    max_abs = max(np.max(np.abs(ux)), 1e-12)
+    scale = min(50.0, max(1.0, 0.15 * max(z) / max_abs))
+
+    ax.axhspan(0.0, L2, color="#d6eaf8", alpha=0.5)
+    if max(z) > L2:
+        ax.axhspan(L2, max(z), color="#f5f5f5", alpha=0.7)
+
+    ax.plot(np.zeros_like(z), z, "k--", label="Undeformed")
+    ax.plot(ux * scale, z, "b-", lw=2.2, label=f"Deformed x{scale:.1f}")
     ax.invert_yaxis()
-    ax.set_xlabel(f"Scaled lateral displacement (x{scale:.1f})")
-    ax.set_ylabel("Depth (m)")
-    ax.set_title("Pile deflected shape with soil layers")
+    ax.set_xlabel("Horizontal displacement (scaled)")
+    ax.set_ylabel("z (m)")
+    ax.set_title("Pile deformed shape")
     ax.grid(True, alpha=0.3)
     ax.legend()
     return fig
 
 
-def plot_response(depth: np.ndarray, values: np.ndarray, title: str, xlabel: str):
+def plot_profile(x, z, xlabel, title):
     fig, ax = plt.subplots(figsize=(6, 8))
-    ax.plot(values, depth, lw=2)
+    ax.plot(x, z, lw=2)
     ax.invert_yaxis()
-    ax.set_title(title)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Depth (m)")
+    ax.set_ylabel("z (m)")
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
     return fig
 
 
-# ------------------------------------------------------------
-# Default app values
-# ------------------------------------------------------------
-DEFAULT_LAYERS = [
-    {
-        "name": "Sand",
-        "z_top": 0.0,
-        "z_bot": 15.0,
-        "soilType": 2,
-        "phi_deg": 35.0,
-        "gamma": 17000.0,
-        "k": 20000000.0,
-        "Cd": 0.1,
-        "model": "api_sand",
-    },
-    {
-        "name": "Clay 2",
-        "z_top": 15.0,
-        "z_bot": 30.0,
-        "soilType": 1,
-        "c": 25000.0,
-        "eps50": 0.02,
-        "gamma": 17000.0,
-        "Cd": 0.1,
-        "model": "default",
-    },
-]
+# ============================================================
+# UI
+# ============================================================
+st.sidebar.header("Geometry")
+L1 = st.sidebar.number_input("Above-ground length L1 (m)", value=DEFAULTS["L1"], step=0.1)
+L2 = st.sidebar.number_input("Embedded length L2 (m)", value=DEFAULTS["L2"], step=0.5)
+diameter = st.sidebar.number_input("Pile diameter (m)", value=DEFAULTS["diameter"], step=0.05)
+nElePile = st.sidebar.number_input("Number of pile elements", value=DEFAULTS["nElePile"], min_value=4, step=2)
 
+st.sidebar.header("Soil")
+gamma = st.sidebar.number_input("Unit weight gamma (kN/m3)", value=DEFAULTS["gamma"], step=0.5)
+phi = st.sidebar.number_input("Friction angle phi (deg)", value=DEFAULTS["phi"], step=1.0)
+Gsoil = st.sidebar.number_input("Soil shear modulus at tip Gsoil (kPa)", value=DEFAULTS["Gsoil"], step=1000.0)
+puSwitch = st.sidebar.selectbox("pult method", [1, 2], index=0, format_func=lambda x: "API" if x == 1 else "Brinch Hansen")
+kSwitch = st.sidebar.selectbox("k variation", [1, 2], index=0, format_func=lambda x: "API linear" if x == 1 else "Modified API parabolic")
+gwtSwitch = st.sidebar.selectbox("Groundwater switch", [1, 2], index=0, format_func=lambda x: "Above GWT" if x == 1 else "Below GWT")
 
-# ------------------------------------------------------------
-# Streamlit GUI
-# ------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="LPILE-Style Lateral Pile")
-st.title("LPILE-Style Lateral Pile Analysis")
+st.sidebar.header("Pile Section")
+E = st.sidebar.number_input("E", value=DEFAULTS["E"], step=1e6, format="%.6e")
+A = st.sidebar.number_input("A", value=DEFAULTS["A"], step=0.01)
+Iz = st.sidebar.number_input("Iz", value=DEFAULTS["Iz"], step=0.001)
+Iy = st.sidebar.number_input("Iy", value=DEFAULTS["Iy"], step=0.001)
+G = st.sidebar.number_input("G", value=DEFAULTS["G"], step=1e6, format="%.6e")
+J = st.sidebar.number_input("J", value=DEFAULTS["J"], step=0.001)
+torsion_stiffness = st.sidebar.number_input("Elastic torsion material", value=DEFAULTS["torsion_stiffness"], step=1e8, format="%.6e")
 
-col1, col2 = st.columns([1, 2])
+st.sidebar.header("Loading and Analysis")
+head_load_x = st.sidebar.number_input("Head lateral load Fx (kN)", value=DEFAULTS["head_load_x"], step=100.0)
+load_steps = st.sidebar.number_input("Load steps", value=DEFAULTS["load_steps"], min_value=1, step=10)
+load_increment = st.sidebar.number_input("LoadControl increment", value=DEFAULTS["load_increment"], step=0.01, format="%.3f")
 
-with col1:
-    st.subheader("Pile and Load Inputs")
-    head_condition = st.selectbox("Head condition", ["free", "fixed"], index=0)
-    base_condition = st.selectbox("Base condition", ["pinned", "fixed"], index=0)
-    H = st.number_input("Head lateral load H (N)", value=1.0e4, format="%.3e")
-    P = st.number_input("Head axial load P (N)", value=0.0, format="%.3e")
-    M = st.number_input("Head moment M (N.m)", value=0.0, format="%.3e")
-    L = st.number_input("Pile length (m)", value=30.0, min_value=0.1, step=0.5)
-    n_ele = st.number_input("Number of beam elements", value=48, min_value=8, step=2)
-    D = st.number_input("Pile diameter (m)", value=0.80, min_value=0.05, step=0.05)
-    E = st.number_input("Pile Young's modulus E (Pa)", value=3.0e10, format="%.3e")
+params = {
+    "L1": float(L1),
+    "L2": float(L2),
+    "diameter": float(diameter),
+    "nElePile": int(nElePile),
+    "gamma": float(gamma),
+    "phi": float(phi),
+    "Gsoil": float(Gsoil),
+    "puSwitch": int(puSwitch),
+    "kSwitch": int(kSwitch),
+    "gwtSwitch": int(gwtSwitch),
+    "head_load_x": float(head_load_x),
+    "load_steps": int(load_steps),
+    "load_increment": float(load_increment),
+    "pult_cd": DEFAULTS["pult_cd"],
+    "tz_cd": DEFAULTS["tz_cd"],
+    "qz_suction": DEFAULTS["qz_suction"],
+    "qz_cd": DEFAULTS["qz_cd"],
+    "E": float(E),
+    "A": float(A),
+    "Iz": float(Iz),
+    "Iy": float(Iy),
+    "G": float(G),
+    "J": float(J),
+    "torsion_stiffness": float(torsion_stiffness),
+}
 
-    st.subheader("Soil Layers JSON")
-    soil_json = st.text_area(
-        "Edit the soil profile as JSON",
-        value=json.dumps(DEFAULT_LAYERS, indent=2),
-        height=320,
-        label_visibility="collapsed",
-    )
+st.subheader("Model basis")
+st.write(
+    "This app follows the uploaded OpenSees BNWF example: spring nodes and pile nodes are built separately, "
+    "p-y, t-z, and q-z materials are generated from the translated Tcl procedures, the pile uses a 3D dispBeamColumn model, "
+    "and the same fixed/equalDOF relationships are applied."
+)
 
-    run = st.button("Run analysis", type="primary")
+summary_df = pd.DataFrame([
+    {"Parameter": "L1", "Value": params["L1"]},
+    {"Parameter": "L2", "Value": params["L2"]},
+    {"Parameter": "diameter", "Value": params["diameter"]},
+    {"Parameter": "nElePile", "Value": params["nElePile"]},
+    {"Parameter": "gamma", "Value": params["gamma"]},
+    {"Parameter": "phi", "Value": params["phi"]},
+    {"Parameter": "Gsoil", "Value": params["Gsoil"]},
+    {"Parameter": "head_load_x", "Value": params["head_load_x"]},
+])
+st.dataframe(summary_df, use_container_width=True)
 
-with col2:
-    st.info(
-        "This version follows the manual-style workflow: nonlinear p-y curves plus finite-difference beam-column solution. "
-        "Displacement, rotation, bending moment, shear, and soil reaction are recovered from the beam relations."
-    )
+run_clicked = st.button("Run BNWF analysis", type="primary")
 
-if run:
+if not OPENSEES_AVAILABLE:
+    st.warning("OpenSeesPy is not installed in this environment.")
+
+if run_clicked and OPENSEES_AVAILABLE:
     try:
-        layers = json.loads(soil_json)
-        if not isinstance(layers, list):
-            raise ValueError("Soil layers JSON must be a list of layer objects.")
+        info = build_bnwf_model(params)
+        ok = run_bnwf_analysis(params, info)
+        if ok != 0:
+            st.error("Analysis did not converge.")
+        else:
+            ops.reactions()
+            node_df, reaction_df, ele_df = get_bnwf_results(info)
 
-        pile = PileInputs(
-            head_condition=head_condition,
-            base_condition=base_condition,
-            H=H,
-            P=P,
-            M=M,
-            L=L,
-            n_ele=int(n_ele),
-            D=D,
-            E=E,
-        )
+            top = node_df.iloc[-1]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Top ux", f"{top['ux']:.6f} m")
+            c2.metric("Max |Mz|", f"{ele_df[['Mz_i','Mz_j']].abs().to_numpy().max():.3f} kN.m")
+            c3.metric("Max |soil Rx|", f"{reaction_df['Rx'].abs().max():.3f} kN")
 
-        errs = validate_layers(layers, pile.L)
-        if errs:
-            for e in errs:
-                st.error(e)
-            st.stop()
+            st.pyplot(plot_deformed_shape(node_df, params["L2"]))
 
-        table = build_layer_table(layers)
-        st.subheader("Layer summary")
-        st.dataframe(table, use_container_width=True)
+            colp1, colp2 = st.columns(2)
+            with colp1:
+                st.pyplot(plot_profile(node_df["ux"].values, node_df["z"].values, "ux (m)", "Lateral displacement"))
+                st.pyplot(plot_profile(reaction_df["Rx"].values, reaction_df["z"].values, "Spring reaction Rx (kN)", "p-y spring reaction"))
+            with colp2:
+                z_ele = ele_df[["zi", "zj"]].mean(axis=1).values
+                mz = 0.5 * (ele_df["Mz_i"].values - ele_df["Mz_j"].values)
+                vy = 0.5 * (ele_df["Vy_i"].values - ele_df["Vy_j"].values)
+                st.pyplot(plot_profile(mz, z_ele, "Mz (kN.m)", "Bending moment"))
+                st.pyplot(plot_profile(vy, z_ele, "Vy (kN)", "Shear"))
 
-        results = solve_beam_fd(pile, layers)
+            st.subheader("Pile node displacements")
+            st.dataframe(node_df, use_container_width=True)
+            st.subheader("Spring reactions")
+            st.dataframe(reaction_df, use_container_width=True)
+            st.subheader("Pile element forces")
+            st.dataframe(ele_df, use_container_width=True)
 
-        top_disp = float(results["y"][0])
-        max_m = float(np.max(np.abs(results["M"])))
-        max_v = float(np.max(np.abs(results["V"])))
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Top displacement", f"{top_disp:.6f} m")
-        c2.metric("Max moment", f"{max_m/1e3:.3f} kN.m")
-        c3.metric("Max shear", f"{max_v/1e3:.3f} kN")
-
-        fig_profile = plot_profile_with_layers(results, layers, pile)
-        st.pyplot(fig_profile, use_container_width=False)
-
-        fig_y = plot_response(results["z"], results["y"], "Displacement (m)", "Lateral displacement (m)")
-        st.pyplot(fig_y, use_container_width=False)
-
-        fig_m = plot_response(results["z"], results["M"] / 1e3, "Bending Moment", "Moment (kN.m)")
-        st.pyplot(fig_m, use_container_width=False)
-
-        fig_v = plot_response(results["z"], results["V"] / 1e3, "Shear Force", "Shear (kN)")
-        st.pyplot(fig_v, use_container_width=False)
-
-        fig_p = plot_response(results["z"], results["p"] / 1e3, "Soil Reaction", "p (kN/m)")
-        st.pyplot(fig_p, use_container_width=False)
-
-        df_out = pd.DataFrame(
-            {
-                "Depth_m": results["z"],
-                "Disp_m": results["y"],
-                "Rotation_rad": results["theta"],
-                "Moment_Nm": results["M"],
-                "Shear_N": results["V"],
-                "SoilReaction_Npm": results["p"],
-            }
-        )
-        st.subheader("Results table")
-        st.dataframe(df_out, use_container_width=True)
-
-    except json.JSONDecodeError as e:
-        st.error(f"Invalid JSON: {e}")
-    except np.linalg.LinAlgError:
-        st.error("The finite-difference system became singular. Try more elements, different boundary conditions, or milder loads.")
-    except Exception as e:
-        st.exception(e)
+    except Exception as exc:
+        st.exception(exc)
