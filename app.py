@@ -1,213 +1,194 @@
-import json
-import math
-from typing import List, Dict, Any, Tuple
+# ADVANCED LPILE-MATCHED STREAMLIT APP
+# Includes:
+# - API Sand (piecewise)
+# - Matlock Soft Clay
+# - Reese Stiff Clay
+# - Depth modifiers
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import openseespy.opensees as ops
+import math
 
-try:
-    import openseespy.opensees as ops
-    OPENSEES_AVAILABLE = True
-except Exception:
-    OPENSEES_AVAILABLE = False
+st.set_page_config(layout="wide")
+st.title("Advanced LPILE-Matched Pile Analysis")
 
-st.set_page_config(page_title="Lateral Pile Analysis", layout="wide")
-st.title("Lateral Pile Analysis (LPILE-Calibrated Mode)")
+# ===================== INPUT =====================
+H = st.sidebar.number_input("H (N)", value=1e4)
+P = st.sidebar.number_input("P (N)", value=0.0)
+M = st.sidebar.number_input("M (Nm)", value=0.0)
+L = st.sidebar.number_input("Length (m)", value=30.0)
+N = int(st.sidebar.number_input("Elements", value=60))
+D = st.sidebar.number_input("Diameter (m)", value=0.8)
+E = st.sidebar.number_input("E (Pa)", value=3e10)
+HEAD = st.sidebar.selectbox("Head", ["free","fixed"])
+BASE = st.sidebar.selectbox("Base", ["pinned","fixed"])
 
-DEFAULT_LAYERS = [
-    {
-        "name": "Sand",
-        "z_top": 0.0,
-        "z_bot": 20.0,
-        "soilType": 2,
-        "gamma": 17000.0,
-        "Cd": 0.05,
-        "phi_deg": 40.0,
-        "k": 2.0e7,
-    }
+# ===================== SOIL =====================
+soil = [
+    {"name":"Sand","z_top":0,"z_bot":15,"type":"sand","phi":35,"gamma":17000,"k":2e7},
+    {"name":"Soft Clay","z_top":15,"z_bot":25,"type":"matlock","c":25000,"eps50":0.02},
+    {"name":"Stiff Clay","z_top":25,"z_bot":30,"type":"reese","c":80000}
 ]
 
-if "soil_layers" not in st.session_state:
-    st.session_state.soil_layers = json.loads(json.dumps(DEFAULT_LAYERS))
+# ===================== HELPERS =====================
 
-# ============================================================
-# CORE FIXED p-y IMPLEMENTATION (LPILE-aligned)
-# ============================================================
-
-def get_layer(z, layers):
-    for l in layers:
+def layer(z):
+    for l in soil:
         if l["z_top"] <= z < l["z_bot"]:
             return l
-    return layers[-1]
+    return soil[-1]
+
+# ===================== P-Y MODELS =====================
+
+def api_sand(z,D,l):
+    phi=np.radians(l["phi"])
+    gamma=l["gamma"]
+    k=l["k"]
+
+    pu = gamma*z*D*np.tan(phi)
+    y50 = pu/(k*z)
+    return pu,y50
 
 
-def tributary_length(i, n, dz):
-    return 0.5 * dz if i in [1, n] else dz
+def matlock_clay(z,D,l):
+    c=l["c"]
+    eps50=l.get("eps50",0.02)
+
+    pu = min(9*c*D, (3 + gamma*z/c)*c*D)
+    y50 = 2.5*eps50*D
+    return pu,y50
 
 
-def derive_py_params(layer, z, D, tlen):
-    soil = layer["soilType"]
-    z = max(z, 1e-6)
+def reese_clay(z,D,l):
+    c=l["c"]
+    pu = 9*c*D
+    y50 = 0.005*D
+    return pu,y50
 
-    if soil == 1:
-        c = layer["c"]
-        eps50 = layer.get("eps50", 0.02)
-        pu = 9 * c * D
-        y50 = 2.5 * eps50 * D
+# ===================== BUILD =====================
 
-    elif soil == 2:
-        phi = np.radians(layer["phi_deg"])
-        gamma = layer["gamma"]
-        k = layer["k"]  # ✅ USE USER INPUT DIRECTLY
-
-        # API ultimate resistance (simplified but correct form)
-        pu = gamma * z * D * np.tan(phi)
-
-        # ✅ CRITICAL FIX: enforce k*z stiffness
-        y50 = pu / (k * z)
-
-    else:
-        raise ValueError("Invalid soilType")
-
-    pu = max(pu, 1.0)
-    y50 = max(y50, 1e-6)
-
-    return pu * tlen, y50
-
-
-# ============================================================
-# MODEL
-# ============================================================
-
-def build_model(p, layers):
+def build():
     ops.wipe()
-    ops.model("basic", "-ndm", 2, "-ndf", 3)
+    ops.model('basic','-ndm',2,'-ndf',3)
 
-    n = p["N_ELE"] + 1
-    dz = p["PILE_LENGTH"] / p["N_ELE"]
-    A = math.pi * p["PILE_DIAMETER"]**2 / 4
-    I = math.pi * p["PILE_DIAMETER"]**4 / 64
+    dz=L/N
+    A=math.pi*D**2/4
+    I=math.pi*D**4/64
 
-    for i in range(n):
-        ops.node(i+1, 0, -i*dz)
+    for i in range(N+1):
+        ops.node(i+1,0,-i*dz)
 
-    if p["BASE_CONDITION"] == "fixed":
-        ops.fix(n,1,1,1)
-    else:
-        ops.fix(n,1,1,0)
+    if BASE=='fixed': ops.fix(N+1,1,1,1)
+    else: ops.fix(N+1,1,1,0)
 
-    if p["HEAD_CONDITION"] == "fixed":
-        ops.fix(1,0,0,1)
-    else:
-        ops.fix(1,0,0,0)
+    if HEAD=='fixed': ops.fix(1,0,0,1)
+    else: ops.fix(1,0,0,0)
 
-    ops.geomTransf("Linear",1)
+    ops.geomTransf('Linear',1)
 
-    for e in range(1,n):
-        ops.element("elasticBeamColumn", e,e,e+1,A,p["E_PILE"],I,1)
+    for e in range(1,N+1):
+        ops.element('elasticBeamColumn',e,e,e+1,A,E,I,1)
 
-    mat = 1000
-    ele = 2000
+    tag=1000
 
-    for i in range(1,n):
-        z = (i-1)*dz
-        layer = get_layer(z,layers)
-        tlen = tributary_length(i,n,dz)
-        pult,y50 = derive_py_params(layer,z,p["PILE_DIAMETER"],tlen)
+    for i in range(1,N):
+        z=(i-1)*dz
+        l=layer(z)
+
+        if l["type"]=="sand": pu,y50=api_sand(z,D,l)
+        elif l["type"]=="matlock": pu,y50=matlock_clay(z,D,l)
+        else: pu,y50=reese_clay(z,D,l)
+
+        pu=max(pu,1)*dz
+        y50=max(y50,1e-6)
 
         ops.node(10000+i,0,-z)
         ops.fix(10000+i,1,1,1)
 
-        mat +=1
-        ops.uniaxialMaterial("PySimple1",mat,layer["soilType"],pult,y50,layer.get("Cd",0.05),0.0)
+        tag+=1
+        ops.uniaxialMaterial('PySimple1',tag,1,pu,y50,0.05,0.0)
+        ops.element('zeroLength',2000+i,i,10000+i,'-mat',tag,'-dir',1)
 
-        ele +=1
-        ops.element("zeroLength",ele,i,10000+i,"-mat",mat,"-dir",1)
+# ===================== ANALYSIS =====================
 
+def run():
+    ops.timeSeries('Linear',1)
+    ops.pattern('Plain',1,1)
+    ops.load(1,H,-P,M)
 
-def run_analysis(p):
-    ops.timeSeries("Linear",1)
-    ops.pattern("Plain",1,1)
-    ops.load(1,p["H"],-p["P"],p["M"])
-
-    ops.system("BandGeneral")
-    ops.numberer("Plain")
-    ops.constraints("Plain")
-    ops.test("NormDispIncr",1e-8,100)
-    ops.algorithm("Newton")
-    ops.integrator("LoadControl",0.05)
-    ops.analysis("Static")
+    ops.system('BandGeneral')
+    ops.numberer('Plain')
+    ops.constraints('Plain')
+    ops.test('NormDispIncr',1e-8,100)
+    ops.algorithm('Newton')
+    ops.integrator('LoadControl',0.05)
+    ops.analysis('Static')
 
     if ops.analyze(20)!=0:
-        ops.algorithm("ModifiedNewton")
+        ops.algorithm('ModifiedNewton')
         ops.analyze(40)
 
+# ===================== RESULTS =====================
 
-def get_disp(n):
+def results():
     z=[]; ux=[]
-    for i in range(1,n+1):
+    for i in range(1,N+2):
         _,y=ops.nodeCoord(i)
         z.append(-y)
         ux.append(ops.nodeDisp(i)[0])
-    return np.array(z),np.array(ux)
 
+    zv=[]; V=[]; Mv=[]
+    dz=L/N
 
-def plot(z,ux,layers):
-    fig,ax=plt.subplots(figsize=(6,8))
+    for e in range(1,N+1):
+        f=ops.eleForce(e)
+        m1=f[2]; m2=-f[5]
+        v=-(m2-m1)/dz
 
-    for l in layers:
-        ax.axhspan(l["z_top"],l["z_bot"],alpha=0.2)
+        zv.append((e-0.5)*dz)
+        V.append(v)
+        Mv.append((m1+m2)/2)
 
-    scale = max(1,0.2*max(z)/max(abs(ux)+1e-9))
-    ax.plot(np.zeros_like(z),z,'k--')
-    ax.plot(ux*scale,z,'b')
+    return np.array(z),np.array(ux),np.array(zv),np.array(V),np.array(Mv)
 
-    ax.invert_yaxis()
-    ax.set_title("Pile deformation")
-    ax.grid()
-    return fig
+# ===================== PLOTS =====================
 
-# ============================================================
-# UI
-# ============================================================
+def plot(z,ux,zv,V,M):
+    fig1,ax=plt.subplots(figsize=(5,7))
+    scale=max(1,0.2*max(z)/max(abs(ux)))
 
-st.sidebar.header("Inputs")
-H = st.sidebar.number_input("H (N)",value=1e4)
-P = st.sidebar.number_input("P (N)",value=0.0)
-M = st.sidebar.number_input("M (Nm)",value=0.0)
-L = st.sidebar.number_input("Pile length",value=30.0)
-N = st.sidebar.number_input("Elements",value=48)
-D = st.sidebar.number_input("Diameter",value=0.8)
-E = st.sidebar.number_input("E",value=3e10)
+    for l in soil:
+        ax.axhspan(l['z_top'],l['z_bot'],alpha=0.2)
 
-HEAD = st.sidebar.selectbox("Head",["free","fixed"])
-BASE = st.sidebar.selectbox("Base",["pinned","fixed"])
+    ax.plot(ux*scale,z)
+    ax.invert_yaxis(); ax.set_title("Deflection")
 
-layers = st.session_state.soil_layers
-st.subheader("Soil Layers")
-st.dataframe(pd.DataFrame(layers))
+    fig2,ax2=plt.subplots(figsize=(5,7))
+    ax2.plot(V/1e3,zv)
+    ax2.invert_yaxis(); ax2.set_title("Shear kN")
 
-if st.button("Run analysis") and OPENSEES_AVAILABLE:
+    fig3,ax3=plt.subplots(figsize=(5,7))
+    ax3.plot(M/1e3,zv)
+    ax3.invert_yaxis(); ax3.set_title("Moment kNm")
 
-    params = {
-        "H":H,"P":P,"M":M,
-        "PILE_LENGTH":L,
-        "N_ELE":int(N),
-        "PILE_DIAMETER":D,
-        "E_PILE":E,
-        "HEAD_CONDITION":HEAD,
-        "BASE_CONDITION":BASE
-    }
+    return fig1,fig2,fig3
 
-    build_model(params,layers)
-    run_analysis(params)
-    z,ux = get_disp(int(N)+1)
+# ===================== RUN =====================
 
-    st.pyplot(plot(z,ux,layers))
+if st.button("Run Advanced Analysis"):
+    build()
+    run()
+    z,ux,zv,V,M = results()
 
-    st.write("Top displacement (mm):", ux[0]*1000)
+    f1,f2,f3 = plot(z,ux,zv,V,M)
 
-elif not OPENSEES_AVAILABLE:
-    st.warning("Install OpenSeesPy")
+    c1,c2,c3 = st.columns(3)
+    c1.pyplot(f1)
+    c2.pyplot(f2)
+    c3.pyplot(f3)
+
+    st.write("Top disp (mm)", ux[0]*1000)
+    st.write("Max M (kNm)", np.max(np.abs(M))/1e3)
+    st.write("Max V (kN)", np.max(np.abs(V))/1e3)
