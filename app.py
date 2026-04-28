@@ -47,220 +47,23 @@ DEFAULTS = {
     "tz_cd": 0.0,
     "qz_suction": 0.0,
     "qz_cd": 0.0,
-    # elasticPileSection.tcl
-    "E": 25000000.0,
-    "A": 0.785,
-    "Iz": 0.049,
-    "Iy": 0.049,
-    "G": 9615385.0,
-    "J": 0.098,
-    "torsion_stiffness": 1.0e10,
-}
-
-
-# ============================================================
-# PARAMETER FUNCTIONS TRANSLATED FROM TCL
-# ============================================================
-def interp_piecewise(x: float, xs: List[float], ys: List[float], x_left=None, x_right=None) -> float:
-    if x <= xs[0]:
-        return ys[0] if x_left is None else x_left
-    if x >= xs[-1]:
-        return ys[-1] if x_right is None else x_right
-    return float(np.interp(x, xs, ys))
-
-
-def get_py_param(py_depth: float, gamma: float, phi_degree: float, b: float, p_ele_length: float,
-                 pu_switch: int, k_switch: int, gwt_switch: int) -> Tuple[float, float]:
-    pi = math.pi
-    phi = math.radians(phi_degree)
-    zb_ratio = py_depth / b if b > 0 else 0.0
-
-    if pu_switch == 1:
-        zb_vals = [
-            0.0000,0.1250,0.2500,0.3750,0.5000,0.6250,0.7500,0.8750,1.0000,1.1250,
-            1.2500,1.3750,1.5000,1.6250,1.7500,1.8750,2.0000,2.1250,2.2500,2.3750,
-            2.5000,2.6250,2.7500,2.8750,3.0000,3.1250,3.2500,3.3750,3.5000,3.6250,
-            3.7500,3.8750,4.0000,4.1250,4.2500,4.3750,4.5000,4.6250,4.7500,4.8750,5.0000
-        ]
-        A_vals = [
-            2.8460,2.7105,2.6242,2.5257,2.4271,2.3409,2.2546,2.1437,2.0575,1.9589,
-            1.8973,1.8111,1.7372,1.6632,1.5893,1.5277,1.4415,1.3799,1.3368,1.2690,
-            1.2074,1.1581,1.1211,1.0780,1.0349,1.0164,0.9979,0.9733,0.9610,0.9487,
-            0.9363,0.9117,0.8994,0.8994,0.8871,0.8871,0.8809,0.8809,0.8809,0.8809,0.8809
-        ]
-        A = 0.88 if zb_ratio >= 5.0 else float(np.interp(zb_ratio, zb_vals, A_vals))
-
-        alpha = phi / 2.0
-        beta = pi / 4.0 + phi / 2.0
-        K0 = 0.4
-        Ka = math.tan(pi / 4.0 - phi / 2.0) ** 2
-
-        c1 = K0 * math.tan(phi) * math.sin(beta) / (math.tan(beta - phi) * math.cos(alpha))
-        c2 = math.tan(beta) / math.tan(beta - phi) * math.tan(beta) * math.tan(alpha)
-        c3 = K0 * math.tan(beta) * (math.tan(phi) * math.sin(beta) - math.tan(alpha))
-        c4 = math.tan(beta) / math.tan(beta - phi) - Ka
-        c5 = Ka * (math.tan(beta) ** 8 - 1.0)
-        c6 = K0 * math.tan(phi) * (math.tan(beta) ** 4)
-
-        pst = gamma * py_depth * (py_depth * (c1 + c2 + c3) + b * c4)
-        psd = b * gamma * py_depth * (c5 + c6)
-
-        if pst <= psd:
-            pu = 0.01 if py_depth == 0 else A * pst
-        else:
-            pu = A * psd
-
-        pult = pu * p_ele_length
-
-    else:
-        Kqo = math.exp((pi / 2 + phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 + phi / 2) \
-            - math.exp(-(pi / 2 - phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 - phi / 2)
-        Kco = (1 / math.tan(phi)) * (
-            math.exp((pi / 2 + phi) * math.tan(phi)) * math.cos(phi) * math.tan(pi / 4 + phi / 2) - 1
-        )
-        dcinf = 1.58 + 4.09 * (math.tan(phi) ** 4)
-        Nc = (1 / math.tan(phi)) * math.exp(pi * math.tan(phi)) * ((math.tan(pi / 4 + phi / 2) ** 2) - 1)
-        Ko = 1 - math.sin(phi)
-        Kcinf = Nc * dcinf
-        Kqinf = Kcinf * Ko * math.tan(phi)
-        aq = (Kqo / (Kqinf - Kqo)) * (Ko * math.sin(phi) / math.sin(pi / 4 + phi / 2))
-        KqD = (Kqo + Kqinf * aq * zb_ratio) / (1 + aq * zb_ratio)
-        pu = 0.01 if py_depth == 0 else gamma * py_depth * KqD * b
-        pult = pu * p_ele_length
-        A = 1.0
-
-    ph = [28.8,29.5,30.0,31.0,32.0,33.0,34.0,35.0,36.0,37.0,38.0,39.0,40.0]
-    if gwt_switch == 1:
-        ktab = [10,23,45,61,80,100,120,140,160,182,215,250,275]
-    else:
-        ktab = [10,20,33,42,50,60,70,85,95,107,122,141,155]
-
-    khat = interp_piecewise(phi_degree, ph, ktab, x_left=ktab[0], x_right=ktab[-1])
-    k_si = khat * 271.45
-
-    sigV = py_depth * gamma
-    if sigV == 0:
-        sigV = 0.01
-    if k_switch == 2:
-        c_sigma = (50 / sigV) ** 0.5
-        k_si = c_sigma * k_si
-
-    x = 0.5
-    atanh_value = 0.5 * math.log((1 + x) / (1 - x))
-    py_depth_eff = 0.01 if py_depth == 0.0 else py_depth
-    y50 = 0.5 * (pu / A) / (k_si * py_depth_eff) * atanh_value
-    return pult, y50
-
-
-def get_tz_param(phi: float, b: float, sigV: float, p_ele_length: float) -> Tuple[float, float]:
-    pi = math.pi
-    delta = 0.8 * phi * pi / 180.0
-    if sigV == 0.0:
-        sigV = 0.01
-    tu = 0.4 * sigV * pi * b * math.tan(delta)
-    tult = tu * p_ele_length
-
-    kf = [6000, 10000, 10000, 14000, 14000, 18000]
-    fric = [28, 31, 32, 34, 35, 38]
-    k = interp_piecewise(phi, fric, kf, x_left=kf[0], x_right=kf[-1])
-    k_si = k * 1.885
-    z50 = tult / k_si
-    return tult, z50
-
-
-def get_qz_param(phi_degree: float, b: float, sigV: float, G: float) -> Tuple[float, float]:
-    pi = math.pi
-    Ko = 1 - math.sin(math.radians(phi_degree))
-    phi = math.radians(phi_degree)
-    Ir = G / (sigV * math.tan(phi))
-    Nq = (1 + 2 * Ko) * (1 / (3 - math.sin(phi))) * math.exp(pi / 2 - phi) * (math.tan(pi / 4 + phi / 2) ** 2) \
-        * (Ir ** ((4 * math.sin(phi)) / (3 * (1 + math.sin(phi)))))
-    qu = Nq * sigV
-    qult = qu * pi * b**2 / 4
-    zc = 0.05 * b
-    z50 = 0.125 * zc
-    return qult, z50
-
-
-# ============================================================
-# BUILD MODEL FROM THE TCL LOGIC
-# ============================================================
-def build_bnwf_model(params: Dict[str, float]) -> Dict[str, int]:
-    ops.wipe()
-
-    L1 = params["L1"]
-    L2 = params["L2"]
-    diameter = params["diameter"]
-    nElePile = int(params["nElePile"])
-    eleSize = (L1 + L2) / nElePile
-    nNodePile = 1 + nElePile
-    gamma = params["gamma"]
-    phi = params["phi"]
-    Gsoil = params["Gsoil"]
-    puSwitch = int(params["puSwitch"])
-    kSwitch = int(params["kSwitch"])
-    gwtSwitch = int(params["gwtSwitch"])
-
-    # Spring nodes
-    ops.model("Basic", "-ndm", 3, "-ndf", 3)
-    count = 0
-    for i in range(1, nNodePile + 1):
-        zCoord = eleSize * (i - 1)
-        if zCoord <= L2 + 1e-12:
-            ops.node(i, 0.0, 0.0, zCoord)
-            ops.node(i + 100, 0.0, 0.0, zCoord)
-            count += 1
-    nNodeEmbed = count
-
-    for i in range(1, nNodeEmbed + 1):
-        ops.fix(i, 1, 1, 1)
-        ops.fix(i + 100, 0, 1, 1)
-
-    # Materials from Tcl procedures
-    for i in range(1, nNodeEmbed + 1):
-        pyDepth = L2 - eleSize * (i - 1)
-        pult, y50 = get_py_param(pyDepth, gamma, phi, diameter, eleSize, puSwitch, kSwitch, gwtSwitch)
-        ops.uniaxialMaterial("PySimple1", i, 2, pult, y50, params["pult_cd"])
-
-    for i in range(2, nNodeEmbed + 1):
-        pyDepth = eleSize * (i - 1)
-        sigV = gamma * pyDepth
-        tult, z50 = get_tz_param(phi, diameter, sigV, eleSize)
-        ops.uniaxialMaterial("TzSimple1", i + 100, 2, tult, z50, params["tz_cd"])
-
-    sigVq = gamma * L2
-    qult, z50q = get_qz_param(phi, diameter, sigVq, Gsoil)
-    ops.uniaxialMaterial("QzSimple1", 101, 2, qult, z50q, params["qz_suction"], params["qz_cd"])
-
-    # zero-length spring elements
-    ops.element("zeroLength", 1001, 1, 101, "-mat", 1, 101, "-dir", 1, 3)
-    for i in range(2, nNodeEmbed + 1):
-        ops.element("zeroLength", i + 1000, i, i + 100, "-mat", i, i + 100, "-dir", 1, 3)
-
-    # pile nodes
-    ops.model("Basic", "-ndm", 3, "-ndf", 6)
-    for i in range(1, nNodePile + 1):
-        zCoord = eleSize * (i - 1)
-        ops.node(i + 200, 0.0, 0.0, zCoord)
-
-    ops.geomTransf("Linear", 1, 0.0, -1.0, 0.0)
-
-    # exact Tcl pile restraints
-    ops.fix(200 + nNodePile, 0, 1, 0, 1, 0, 1)
-    for i in range(202, 200 + nNodePile):
-        ops.fix(i, 0, 1, 0, 1, 0, 1)
-
-    for i in range(1, nNodeEmbed + 1):
-        ops.equalDOF(i + 200, i + 100, 1, 3)
-
-    # elasticPileSection.tcl
-    ops.section("Elastic", 1, params["E"], params["A"], params["Iz"], params["Iy"], params["G"], params["J"])
-    ops.uniaxialMaterial("Elastic", 3000, params["torsion_stiffness"])
-    secTag3D = 3
-    ops.section("Aggregator", secTag3D, 3000, "T", "-section", 1)
-
+    # elasticPileSection.tcl translated directly, but use 3D elasticBeamColumn in OpenSeesPy
+    # This preserves the same elastic section properties from the Tcl example and avoids
+    # the OpenSeesPy dispBeamColumn argument/signature mismatch seen in deployment.
     for i in range(201, 200 + nElePile + 1):
-        ops.element("dispBeamColumn", i, i, i + 1, secTag3D, 3, 1)
+        ops.element(
+            "elasticBeamColumn",
+            i,
+            i,
+            i + 1,
+            params["A"],
+            params["E"],
+            params["G"],
+            params["J"],
+            params["Iy"],
+            params["Iz"],
+            1,
+        )
 
     return {
         "eleSize": eleSize,
