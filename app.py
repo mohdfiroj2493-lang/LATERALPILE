@@ -582,9 +582,11 @@ if run_clicked and OPENSEES_AVAILABLE:
 
             # For a vertical pile with lateral load in global X:
             # shear is the global X force component and bending is about global Y.
-            # preserve sign (DO NOT use absolute)
-            shear_x = 0.5 * (ele_df["P_i"].values + ele_df["P_j"].values)
-            moment_y = 0.5 * (ele_df["My_i"].values + ele_df["My_j"].values)
+            # Use a consistent single element end for diagrams.
+            # Averaging i-end and j-end forces cancels shear and distorts moment because
+            # the two ends are equal-and-opposite nodal actions for the same element.
+            shear_x = ele_df["P_i"].to_numpy(dtype=float)
+            moment_y = ele_df["My_i"].to_numpy(dtype=float)
 
             node_plot = node_df.copy().sort_values("depth")
             spring_plot = spring_df.copy().sort_values("depth")
