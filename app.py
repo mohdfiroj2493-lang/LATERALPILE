@@ -593,13 +593,31 @@ for i, layer in enumerate(st.session_state.soil_layers):
             step=0.5,
             key=f"gamma_{i}",
         )
-        phi_i = c6.number_input(
-            "phi (deg)",
-            value=float(layer.get("phi", 36.0)),
-            step=1.0,
-            key=f"phi_{i}",
-        )
+
+        # Sand uses phi, Clay uses cohesion c
+        if soil_type == "Sand":
+            phi_i = c6.number_input(
+                "phi (deg)",
+                value=float(layer.get("phi", 36.0)),
+                step=1.0,
+                key=f"phi_{i}",
+            )
+            c_i = layer.get("c", 0.0)
+        else:
+            c_i = c6.number_input(
+                "c (kPa)",
+                value=float(layer.get("c", 25.0)),
+                step=5.0,
+                key=f"c_{i}",
+            )
+            phi_i = layer.get("phi", 0.0)
+
         gsoil_i = c7.number_input(
+            "Gsoil (kPa)",
+            value=float(layer.get("Gsoil", 150000.0)),
+            step=1000.0,
+            key=f"gsoil_{i}",
+        )(
             "Gsoil (kPa)",
             value=float(layer.get("Gsoil", 150000.0)),
             step=1000.0,
@@ -613,6 +631,7 @@ for i, layer in enumerate(st.session_state.soil_layers):
             "z_bot": float(z_bot),
             "gamma": float(gamma_i),
             "phi": float(phi_i),
+            "c": float(c_i),
             "Gsoil": float(gsoil_i),
             "soilType": 2 if soil_type == "Sand" else 1
         })
