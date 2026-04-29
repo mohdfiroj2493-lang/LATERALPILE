@@ -581,12 +581,30 @@ for i, layer in enumerate(st.session_state.soil_layers):
         z_top = c2.number_input("z_top (m)", value=float(layer.get("z_top", 0.0)), step=0.5, key=f"ztop_{i}")
         z_bot = c3.number_input("z_bot (m)", value=float(layer.get("z_bot", 1.0)), step=0.5, key=f"zbot_{i}")
         c4, c5, c6, c7 = st.columns(4)
-        soil_type = c4.selectbox("Soil Type", ["Sand", "Clay"], index=0 if layer.get("soilType",2)==2 else 1, key=f"stype_{i}")
-        gamma_i = c5.number_input("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
-        phi_i = c6.number_input("phi (deg)", value=float(layer.get("phi", 36.0)), step=1.0, key=f"phi_{i}")
-        gsoil_i = c7.number_input("Gsoil (kPa)", value=float(layer.get("Gsoil", 150000.0)), step=1000.0, key=f"gsoil_{i}")("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
-        phi_i = c5.number_input("phi (deg)", value=float(layer.get("phi", 36.0)), step=1.0, key=f"phi_{i}")
-        gsoil_i = c6.number_input("Gsoil (kPa)", value=float(layer.get("Gsoil", 150000.0)), step=1000.0, key=f"gsoil_{i}")
+        soil_type = c4.selectbox(
+            "Soil Type",
+            ["Sand", "Clay"],
+            index=0 if layer.get("soilType", 2) == 2 else 1,
+            key=f"stype_{i}",
+        )
+        gamma_i = c5.number_input(
+            "gamma (kN/m3)",
+            value=float(layer.get("gamma", 17.0)),
+            step=0.5,
+            key=f"gamma_{i}",
+        )
+        phi_i = c6.number_input(
+            "phi (deg)",
+            value=float(layer.get("phi", 36.0)),
+            step=1.0,
+            key=f"phi_{i}",
+        )
+        gsoil_i = c7.number_input(
+            "Gsoil (kPa)",
+            value=float(layer.get("Gsoil", 150000.0)),
+            step=1000.0,
+            key=f"gsoil_{i}",
+        )
         if st.button(f"Delete layer {i+1}", key=f"del_layer_{i}"):
             continue
         updated_layers.append({
