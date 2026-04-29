@@ -295,11 +295,13 @@ def build_and_run_model(params: Dict[str, float]):
     op.geomTransf('Linear', 1, 0.0, -1.0, 0.0)
 
     # pile head boundary condition
+    # For lateral pile analysis, "free" vs "fixed" refers to head rotation,
+    # not whether the loaded head node can translate laterally.
     if params["head_condition"] == "fixed":
-        # restrain lateral translation and rotation about global Y at the head
-        op.fix(200 + nNodePile, 1, 1, 0, 1, 1, 1)
+        # translation in global X remains free; rotation about global Y is fixed
+        op.fix(200 + nNodePile, 0, 1, 0, 1, 1, 1)
     else:
-        # free head in lateral translation and rotation about global Y
+        # translation in global X and rotation about global Y are both free
         op.fix(200 + nNodePile, 0, 1, 0, 1, 0, 1)
 
     for i in range(201, 200 + nNodePile):
