@@ -354,11 +354,14 @@ def build_and_run_model(params: Dict[str, float]):
         coord = op.nodeCoord(i)
         disp = op.nodeDisp(i)
         react = op.nodeReaction(i)
+        # Convert OpenSees z-coordinate to depth measured downward from pile head
+        depth_from_head = (L1 + L2) - coord[2]
         disp_rows.append({
             "node": i,
             "x": coord[0],
             "y": coord[1],
             "z": coord[2],
+            "depth": depth_from_head,
             "ux": disp[0],
             "uy": disp[1],
             "uz": disp[2],
@@ -375,9 +378,11 @@ def build_and_run_model(params: Dict[str, float]):
     for i in range(1, nNodeEmbed + 1):
         coord = op.nodeCoord(i)
         react = op.nodeReaction(i)
+        depth_from_head = (L1 + L2) - coord[2]
         spring_rows.append({
             "spring_node": i,
             "z": coord[2],
+            "depth": depth_from_head,
             "Rx": react[0] if len(react) > 0 else 0.0,
             "Ry": react[1] if len(react) > 1 else 0.0,
             "Rz": react[2] if len(react) > 2 else 0.0,
@@ -414,88 +419,89 @@ def build_and_run_model(params: Dict[str, float]):
 # ============================================================
 # PLOTTING
 # ============================================================
-def plot_displacement_profile(x, z):
-    z = np.asarray(z, dtype=float)
+def plot_displacement_profile(x, depth):
+    depth = np.asarray(depth, dtype=float)
     x = np.asarray(x, dtype=float)
-    order = np.argsort(z)
-    z = z[order]
+    order = np.argsort(depth)
+    depth = depth[order]
     x = x[order]
 
     fig, ax = plt.subplots(figsize=(7, 9))
-    ax.plot(x, z, lw=2.2)
-    ax.set_ylim(max(z) + 1.0, -1.0)
-    ax.set_ylabel("Depth z (m)")
+    ax.plot(x, depth, lw=2.2)
+    ax.set_ylim(max(depth) + 1.0, -1.0)
+    ax.set_ylabel("Depth from pile head (m)")
     ax.set_xlabel("ux (m)")
     ax.set_title("Lateral displacement", fontsize=18)
     ax.grid(True, alpha=0.35)
     return fig
 
 
-def plot_reaction_profile(x, z):
-    z = np.asarray(z, dtype=float)
+def plot_reaction_profile(x, depth):
+    depth = np.asarray(depth, dtype=float)
     x = np.asarray(x, dtype=float)
-    order = np.argsort(z)
-    z = z[order]
+    order = np.argsort(depth)
+    depth = depth[order]
     x = x[order]
 
     fig, ax = plt.subplots(figsize=(7, 9))
-    ax.plot(x, z, lw=2.2)
-    ax.set_ylim(max(z) + 1.0, -1.0)
-    ax.set_ylabel("Depth z (m)")
+    ax.plot(x, depth, lw=2.2)
+    ax.set_ylim(max(depth) + 1.0, -1.0)
+    ax.set_ylabel("Depth from pile head (m)")
     ax.set_xlabel("Reaction Rx (kN)")
     ax.set_title("Spring reaction profile", fontsize=18)
     ax.grid(True, alpha=0.35)
     return fig
 
 
-def plot_moment_profile(x, z):
-    z = np.asarray(z, dtype=float)
+def plot_moment_profile(x, depth):
+    depth = np.asarray(depth, dtype=float)
     x = np.asarray(x, dtype=float)
-    order = np.argsort(z)
-    z = z[order]
+    order = np.argsort(depth)
+    depth = depth[order]
     x = x[order]
 
     fig, ax = plt.subplots(figsize=(7, 9))
-    ax.plot(x, z, lw=2.2)
-    ax.set_ylim(max(z) + 1.0, -1.0)
-    ax.set_ylabel("Depth z (m)")
+    ax.plot(x, depth, lw=2.2)
+    ax.set_ylim(max(depth) + 1.0, -1.0)
+    ax.set_ylabel("Depth from pile head (m)")
     ax.set_xlabel("My (kN.m)")
     ax.set_title("Bending moment profile", fontsize=18)
     ax.grid(True, alpha=0.35)
     return fig
 
 
-def plot_shear_profile(x, z):
-    z = np.asarray(z, dtype=float)
+def plot_shear_profile(x, depth):
+    depth = np.asarray(depth, dtype=float)
     x = np.asarray(x, dtype=float)
-    order = np.argsort(z)
-    z = z[order]
+    order = np.argsort(depth)
+    depth = depth[order]
     x = x[order]
 
     fig, ax = plt.subplots(figsize=(7, 9))
-    ax.plot(x, z, lw=2.2)
-    ax.set_ylim(max(z) + 1.0, -1.0)
-    ax.set_ylabel("Depth z (m)")
+    ax.plot(x, depth, lw=2.2)
+    ax.set_ylim(max(depth) + 1.0, -1.0)
+    ax.set_ylabel("Depth from pile head (m)")
     ax.set_xlabel("Fx (kN)")
     ax.set_title("Shear profile", fontsize=18)
     ax.grid(True, alpha=0.35)
     return fig
 
 
-def plot_deformed_shape(node_df, L2):
+def plot_deformed_shape(node_df, L1, L2):
     fig, ax = plt.subplots(figsize=(7, 9))
-    df = node_df.sort_values("z").copy()
-    z = df["z"].values
+    df = node_df.sort_values("depth").copy()
+    depth = df["depth"].values
     ux = df["ux"].values
     max_abs = max(np.max(np.abs(ux)), 1e-12)
-    scale = min(50.0, max(1.0, 0.15 * max(z) / max_abs))
+    scale = min(50.0, max(1.0, 0.15 * max(depth) / max_abs))
 
-    ax.axhspan(0.0, L2, color="#d6eaf8", alpha=0.35)
-    ax.plot(np.zeros_like(z), z, "k--", lw=1.2, label="Undeformed")
-    ax.plot(ux * scale, z, "b-", lw=2.4, label=f"Deformed x{scale:.1f}")
-    ax.set_ylim(max(z) + 1.0, -1.0)
+    # Embedded zone measured from pile head starts at L1
+    ax.axhspan(L1, L1 + L2, color="#d6eaf8", alpha=0.35)
+    ax.plot(np.zeros_like(depth), depth, "k--", lw=1.2, label="Undeformed")
+    ax.plot(ux * scale, depth, "b-", lw=2.4, label=f"Deformed x{scale:.1f}")
+    ax.set_ylim(max(depth) + 1.0, -1.0)
     ax.set_xlabel("Horizontal displacement (scaled)")
-    ax.set_ylabel("Depth z (m)")
+    ax.set_ylabel("Depth from pile head (m)")
     ax.set_title("Pile deformed shape", fontsize=18)
     ax.grid(True, alpha=0.35)
     ax.legend()
@@ -572,30 +578,30 @@ if run_clicked and OPENSEES_AVAILABLE:
             st.error("Analysis did not converge.")
         else:
             top = node_df.iloc[-1]
-            z_ele = 0.5 * (ele_df["zi"].values + ele_df["zj"].values)
+            depth_ele = (params["L1"] + params["L2"]) - 0.5 * (ele_df["zi"].values + ele_df["zj"].values)
 
             # For a vertical pile with lateral load in global X:
             # shear is the global X force component and bending is about global Y.
             shear_x = 0.5 * (np.abs(ele_df["P_i"].values) + np.abs(ele_df["P_j"].values))
             moment_y = 0.5 * (np.abs(ele_df["My_i"].values) + np.abs(ele_df["My_j"].values))
 
-            node_plot = node_df.copy().sort_values("z")
-            spring_plot = spring_df.copy().sort_values("z")
+            node_plot = node_df.copy().sort_values("depth")
+            spring_plot = spring_df.copy().sort_values("depth")
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Top displacement ux", f"{top['ux']:.6f} m")
             c2.metric("Max |My|", f"{np.max(np.abs(moment_y)):.3f} kN.m")
             c3.metric("Max |Fx|", f"{np.max(np.abs(shear_x)):.3f} kN")
 
-            st.pyplot(plot_deformed_shape(node_plot, params["L2"]))
+            st.pyplot(plot_deformed_shape(node_plot, params["L1"], params["L2"]))
 
             p1, p2 = st.columns(2)
             with p1:
-                st.pyplot(plot_displacement_profile(node_plot["ux"].values, node_plot["z"].values))
-                st.pyplot(plot_reaction_profile(spring_plot["Rx"].values, spring_plot["z"].values))
+                st.pyplot(plot_displacement_profile(node_plot["ux"].values, node_plot["depth"].values))
+                st.pyplot(plot_reaction_profile(spring_plot["Rx"].values, spring_plot["depth"].values))
             with p2:
-                st.pyplot(plot_moment_profile(moment_y, z_ele))
-                st.pyplot(plot_shear_profile(shear_x, z_ele))
+                st.pyplot(plot_moment_profile(moment_y, depth_ele))
+                st.pyplot(plot_shear_profile(shear_x, depth_ele))
 
             st.subheader("Pile node results")
             st.dataframe(node_df, use_container_width=True)
