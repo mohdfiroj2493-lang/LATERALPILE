@@ -415,31 +415,38 @@ def build_and_run_model(params: Dict[str, float]):
 # PLOTTING
 # ============================================================
 def plot_profile(x, z, xlabel, title):
-    fig, ax = plt.subplots(figsize=(6, 8))
-    ax.plot(x, z, lw=2)
-    ax.invert_yaxis()
+    z = np.asarray(z, dtype=float)
+    x = np.asarray(x, dtype=float)
+    order = np.argsort(z)
+    z = z[order]
+    x = x[order]
+
+    fig, ax = plt.subplots(figsize=(7, 9))
+    ax.plot(x, z, lw=2.2)
+    ax.set_ylim(max(z) + 1.0, -1.0)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Depth z (m)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
+    ax.set_title(title, fontsize=18)
+    ax.grid(True, alpha=0.35)
     return fig
 
 
 def plot_deformed_shape(node_df, L2):
-    fig, ax = plt.subplots(figsize=(6, 8))
-    z = node_df["z"].values
-    ux = node_df["ux"].values
+    fig, ax = plt.subplots(figsize=(7, 9))
+    df = node_df.sort_values("z").copy()
+    z = df["z"].values
+    ux = df["ux"].values
     max_abs = max(np.max(np.abs(ux)), 1e-12)
     scale = min(50.0, max(1.0, 0.15 * max(z) / max_abs))
 
-    ax.axhspan(0.0, L2, color="#d6eaf8", alpha=0.5)
-    ax.plot(np.zeros_like(z), z, "k--", label="Undeformed")
-    ax.plot(ux * scale, z, "b-", lw=2.2, label=f"Deformed x{scale:.1f}")
-    ax.invert_yaxis()
+    ax.axhspan(0.0, L2, color="#d6eaf8", alpha=0.35)
+    ax.plot(np.zeros_like(z), z, "k--", lw=1.2, label="Undeformed")
+    ax.plot(ux * scale, z, "b-", lw=2.4, label=f"Deformed x{scale:.1f}")
+    ax.set_ylim(max(z) + 1.0, -1.0)
     ax.set_xlabel("Horizontal displacement (scaled)")
     ax.set_ylabel("Depth z (m)")
-    ax.set_title("Pile deformed shape")
-    ax.grid(True, alpha=0.3)
+    ax.set_title("Pile deformed shape", fontsize=18)
+    ax.grid(True, alpha=0.35)
     ax.legend()
     return fig
 
