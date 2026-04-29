@@ -218,7 +218,14 @@ def get_tzParam(phi, b, sigV, pEleLength):
 # ============================================================
 # MODEL BUILD AND ANALYSIS - DIRECTLY FROM USER CODE
 # ============================================================
-def build_and_run_model(params: Dict[str, float]):
+def get_layer_at_depth(depth, soil_layers):
+    for layer in soil_layers:
+        if layer["z_top"] <= depth <= layer["z_bot"]:
+            return layer
+    return soil_layers[-1]
+
+
+def build_and_run_model(params: Dict[str, float], soil_layers):
     op.wipe()
 
     L1 = params["L1"]
@@ -228,9 +235,9 @@ def build_and_run_model(params: Dict[str, float]):
     eleSize = (L1 + L2) / nElePile
     nNodePile = 1 + nElePile
 
-    gamma = params["gamma"]
-    phi = params["phi"]
-    Gsoil = params["Gsoil"]
+    default_gamma = params.get("gamma", 17.0)
+    default_phi = params.get("phi", 36.0)
+    default_Gsoil = params.get("Gsoil", 150000.0)
     puSwitch = int(params["puSwitch"])
     kSwitch = int(params["kSwitch"])
     gwtSwitch = int(params["gwtSwitch"])
@@ -257,6 +264,10 @@ def build_and_run_model(params: Dict[str, float]):
     # ----------------------------------------------------------
     for i in range(1, nNodeEmbed + 1):
         pyDepth = L2 - eleSize * (i - 1)
+        layer_depth = L2 - pyDepth
+        layer = get_layer_at_depth(layer_depth, soil_layers)
+        gamma = layer.get("gamma", default_gamma)
+        phi = layer.get("phi", default_phi)
         pyParam = get_pyParam(pyDepth, gamma, phi, diameter, eleSize, puSwitch, kSwitch, gwtSwitch)
         pult = pyParam[0]
         y50 = pyParam[1]
@@ -264,12 +275,19 @@ def build_and_run_model(params: Dict[str, float]):
 
     for i in range(2, nNodeEmbed + 1):
         pyDepth = eleSize * (i - 1)
+        layer = get_layer_at_depth(pyDepth, soil_layers)
+        gamma = layer.get("gamma", default_gamma)
+        phi = layer.get("phi", default_phi)
         sigV = gamma * pyDepth
         tzParam = get_tzParam(phi, diameter, sigV, eleSize)
         tult = tzParam[0]
         z50 = tzParam[1]
         op.uniaxialMaterial('TzSimple1', i + 100, 2, tult, z50, 0.0)
 
+    tip_layer = get_layer_at_depth(L2, soil_layers)
+    gamma = tip_layer.get("gamma", default_gamma)
+    phi = tip_layer.get("phi", default_phi)
+    Gsoil = tip_layer.get("Gsoil", default_Gsoil)
     sigVq = gamma * L2
     qzParam = get_qzParam(phi, diameter, sigVq, Gsoil)
     qult = qzParam[0]
@@ -528,12 +546,54 @@ diameter = st.sidebar.number_input("Pile diameter (m)", value=1.0, step=0.05)
 nElePile = st.sidebar.number_input("Number of pile elements", value=84, min_value=4, step=2)
 
 st.sidebar.header("Soil Properties")
-gamma = st.sidebar.number_input("Soil unit weight gamma (kN/m3)", value=17.0, step=0.5)
-phi = st.sidebar.number_input("Friction angle phi (deg)", value=36.0, step=1.0)
-Gsoil = st.sidebar.number_input("Soil shear modulus at pile tip Gsoil (kPa)", value=150000.0, step=1000.0)
 puSwitch = st.sidebar.selectbox("pult method", [1, 2], index=0, format_func=lambda x: "API" if x == 1 else "Brinch Hansen")
 kSwitch = st.sidebar.selectbox("k variation", [1, 2], index=0, format_func=lambda x: "API linear" if x == 1 else "Modified API parabolic")
 gwtSwitch = st.sidebar.selectbox("Groundwater switch", [1, 2], index=0, format_func=lambda x: "Above GWT" if x == 1 else "Below GWT")
+
+st.subheader("Soil Layers")
+if "soil_layers" not in st.session_state:
+    st.session_state.soil_layers = [
+        {"name": "Layer 1", "z_top": 0.0, "z_bot": 20.0, "gamma": 17.0, "phi": 36.0, "Gsoil": 150000.0}
+    ]
+
+col_add1, col_add2 = st.columns([1, 5])
+with col_add1:
+    if st.button("Add layer"):
+        next_top = st.session_state.soil_layers[-1]["z_bot"] if st.session_state.soil_layers else 0.0
+        st.session_state.soil_layers.append({
+            "name": f"Layer {len(st.session_state.soil_layers)+1}",
+            "z_top": float(next_top),
+            "z_bot": float(next_top) + 1.0,
+            "gamma": 17.0,
+            "phi": 36.0,
+            "Gsoil": 150000.0,
+        })
+
+updated_layers = []
+for i, layer in enumerate(st.session_state.soil_layers):
+    with st.expander(f"Soil Layer {i+1}", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        name = c1.text_input("Name", value=layer.get("name", f"Layer {i+1}"), key=f"lname_{i}")
+        z_top = c2.number_input("z_top (m)", value=float(layer.get("z_top", 0.0)), step=0.5, key=f"ztop_{i}")
+        z_bot = c3.number_input("z_bot (m)", value=float(layer.get("z_bot", 1.0)), step=0.5, key=f"zbot_{i}")
+        c4, c5, c6 = st.columns(3)
+        gamma_i = c4.number_input("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
+        phi_i = c5.number_input("phi (deg)", value=float(layer.get("phi", 36.0)), step=1.0, key=f"phi_{i}")
+        gsoil_i = c6.number_input("Gsoil (kPa)", value=float(layer.get("Gsoil", 150000.0)), step=1000.0, key=f"gsoil_{i}")
+        if st.button(f"Delete layer {i+1}", key=f"del_layer_{i}"):
+            continue
+        updated_layers.append({
+            "name": name,
+            "z_top": float(z_top),
+            "z_bot": float(z_bot),
+            "gamma": float(gamma_i),
+            "phi": float(phi_i),
+            "Gsoil": float(gsoil_i),
+        })
+
+st.session_state.soil_layers = sorted(updated_layers, key=lambda x: x["z_top"])
+soil_layers = st.session_state.soil_layers
+st.dataframe(pd.DataFrame(soil_layers), use_container_width=True)
 
 st.sidebar.header("Pile Section")
 E = st.sidebar.number_input("E", value=25000000.0, step=1e6, format="%.6e")
@@ -557,9 +617,6 @@ params = {
     "L2": float(L2),
     "diameter": float(diameter),
     "nElePile": int(nElePile),
-    "gamma": float(gamma),
-    "phi": float(phi),
-    "Gsoil": float(Gsoil),
     "puSwitch": int(puSwitch),
     "kSwitch": int(kSwitch),
     "gwtSwitch": int(gwtSwitch),
@@ -588,7 +645,7 @@ if not OPENSEES_AVAILABLE:
 
 if run_clicked and OPENSEES_AVAILABLE:
     try:
-        ok, node_df, spring_df, ele_df = build_and_run_model(params)
+        ok, node_df, spring_df, ele_df = build_and_run_model(params, soil_layers)
 
         if ok != 0:
             st.error("Analysis did not converge.")
