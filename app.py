@@ -617,11 +617,6 @@ for i, layer in enumerate(st.session_state.soil_layers):
             value=float(layer.get("Gsoil", 150000.0)),
             step=1000.0,
             key=f"gsoil_{i}",
-        )(
-            "Gsoil (kPa)",
-            value=float(layer.get("Gsoil", 150000.0)),
-            step=1000.0,
-            key=f"gsoil_{i}",
         )
         if st.button(f"Delete layer {i+1}", key=f"del_layer_{i}"):
             continue
