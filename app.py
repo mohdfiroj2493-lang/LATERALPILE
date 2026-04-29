@@ -288,7 +288,8 @@ def build_and_run_model(params: Dict[str, float]):
     # ----------------------------------------------------------
     op.model('basic', '-ndm', 3, '-ndf', 6)
     for i in range(1, nNodePile + 1):
-        zCoord = eleSize * i
+        # node 201 starts at the ground line, increasing downward
+        zCoord = eleSize * (i - 1)
         op.node(i + 200, 0.0, 0.0, zCoord)
 
     op.geomTransf('Linear', 1, 0.0, -1.0, 0.0)
@@ -514,23 +515,29 @@ if run_clicked and OPENSEES_AVAILABLE:
         else:
             top = node_df.iloc[-1]
             z_ele = 0.5 * (ele_df["zi"].values + ele_df["zj"].values)
-            mz = 0.5 * (ele_df["Mz_i"].values - ele_df["Mz_j"].values)
-            vy = 0.5 * (ele_df["Vy_i"].values - ele_df["Vy_j"].values)
+
+            # For a vertical pile with lateral load in global X:
+            # shear is the global X force component and bending is about global Y.
+            shear_x = 0.5 * (np.abs(ele_df["P_i"].values) + np.abs(ele_df["P_j"].values))
+            moment_y = 0.5 * (np.abs(ele_df["My_i"].values) + np.abs(ele_df["My_j"].values))
+
+            node_plot = node_df.copy().sort_values("z")
+            spring_plot = spring_df.copy().sort_values("z")
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Top displacement ux", f"{top['ux']:.6f} m")
-            c2.metric("Max |Mz|", f"{np.max(np.abs(mz)):.3f} kN.m")
-            c3.metric("Max |Vy|", f"{np.max(np.abs(vy)):.3f} kN")
+            c2.metric("Max |My|", f"{np.max(np.abs(moment_y)):.3f} kN.m")
+            c3.metric("Max |Fx|", f"{np.max(np.abs(shear_x)):.3f} kN")
 
-            st.pyplot(plot_deformed_shape(node_df, params["L2"]))
+            st.pyplot(plot_deformed_shape(node_plot, params["L2"]))
 
             p1, p2 = st.columns(2)
             with p1:
-                st.pyplot(plot_profile(node_df["ux"].values, node_df["z"].values, "ux (m)", "Lateral displacement"))
-                st.pyplot(plot_profile(spring_df["Rx"].values, spring_df["z"].values, "Reaction Rx (kN)", "Spring reaction profile"))
+                st.pyplot(plot_profile(node_plot["ux"].values, node_plot["z"].values, "ux (m)", "Lateral displacement"))
+                st.pyplot(plot_profile(spring_plot["Rx"].values, spring_plot["z"].values, "Reaction Rx (kN)", "Spring reaction profile"))
             with p2:
-                st.pyplot(plot_profile(mz, z_ele, "Mz (kN.m)", "Bending moment profile"))
-                st.pyplot(plot_profile(vy, z_ele, "Vy (kN)", "Shear profile"))
+                st.pyplot(plot_profile(moment_y, z_ele, "My (kN.m)", "Bending moment profile"))
+                st.pyplot(plot_profile(shear_x, z_ele, "Fx (kN)", "Shear profile"))
 
             st.subheader("Pile node results")
             st.dataframe(node_df, use_container_width=True)
