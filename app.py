@@ -268,6 +268,8 @@ def build_and_run_model(params: Dict[str, float], soil_layers):
         layer = get_layer_at_depth(layer_depth, soil_layers)
         gamma = layer.get("gamma", default_gamma)
         phi = layer.get("phi", default_phi)
+        soilType = layer.get("soilType",2)
+        # For now, both clay and sand use same py function; extend later if needed
         pyParam = get_pyParam(pyDepth, gamma, phi, diameter, eleSize, puSwitch, kSwitch, gwtSwitch)
         pult = pyParam[0]
         y50 = pyParam[1]
@@ -278,6 +280,7 @@ def build_and_run_model(params: Dict[str, float], soil_layers):
         layer = get_layer_at_depth(pyDepth, soil_layers)
         gamma = layer.get("gamma", default_gamma)
         phi = layer.get("phi", default_phi)
+        soilType = layer.get("soilType",2)
         sigV = gamma * pyDepth
         tzParam = get_tzParam(phi, diameter, sigV, eleSize)
         tult = tzParam[0]
@@ -570,14 +573,18 @@ with col_add1:
         })
 
 updated_layers = []
+# Soil type selection added: 1 = clay, 2 = sand
 for i, layer in enumerate(st.session_state.soil_layers):
-    with st.expander(f"Soil Layer {i+1}", expanded=True):
+    with st.expander(f"Soil Layer {i+1}", expanded=True):, expanded=True):
         c1, c2, c3 = st.columns(3)
         name = c1.text_input("Name", value=layer.get("name", f"Layer {i+1}"), key=f"lname_{i}")
         z_top = c2.number_input("z_top (m)", value=float(layer.get("z_top", 0.0)), step=0.5, key=f"ztop_{i}")
         z_bot = c3.number_input("z_bot (m)", value=float(layer.get("z_bot", 1.0)), step=0.5, key=f"zbot_{i}")
-        c4, c5, c6 = st.columns(3)
-        gamma_i = c4.number_input("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
+        c4, c5, c6, c7 = st.columns(4)
+        soil_type = c4.selectbox("Soil Type", ["Sand", "Clay"], index=0 if layer.get("soilType",2)==2 else 1, key=f"stype_{i}")
+        gamma_i = c5.number_input("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
+        phi_i = c6.number_input("phi (deg)", value=float(layer.get("phi", 36.0)), step=1.0, key=f"phi_{i}")
+        gsoil_i = c7.number_input("Gsoil (kPa)", value=float(layer.get("Gsoil", 150000.0)), step=1000.0, key=f"gsoil_{i}")("gamma (kN/m3)", value=float(layer.get("gamma", 17.0)), step=0.5, key=f"gamma_{i}")
         phi_i = c5.number_input("phi (deg)", value=float(layer.get("phi", 36.0)), step=1.0, key=f"phi_{i}")
         gsoil_i = c6.number_input("Gsoil (kPa)", value=float(layer.get("Gsoil", 150000.0)), step=1000.0, key=f"gsoil_{i}")
         if st.button(f"Delete layer {i+1}", key=f"del_layer_{i}"):
@@ -589,6 +596,7 @@ for i, layer in enumerate(st.session_state.soil_layers):
             "gamma": float(gamma_i),
             "phi": float(phi_i),
             "Gsoil": float(gsoil_i),
+            "soilType": 2 if soil_type == "Sand" else 1
         })
 
 st.session_state.soil_layers = sorted(updated_layers, key=lambda x: x["z_top"])
