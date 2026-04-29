@@ -414,7 +414,7 @@ def build_and_run_model(params: Dict[str, float]):
 # ============================================================
 # PLOTTING
 # ============================================================
-def plot_profile(x, z, xlabel, title):
+def plot_displacement_profile(x, z):
     z = np.asarray(z, dtype=float)
     x = np.asarray(x, dtype=float)
     order = np.argsort(z)
@@ -424,9 +424,60 @@ def plot_profile(x, z, xlabel, title):
     fig, ax = plt.subplots(figsize=(7, 9))
     ax.plot(x, z, lw=2.2)
     ax.set_ylim(max(z) + 1.0, -1.0)
-    ax.set_xlabel(xlabel)
     ax.set_ylabel("Depth z (m)")
-    ax.set_title(title, fontsize=18)
+    ax.set_xlabel("ux (m)")
+    ax.set_title("Lateral displacement", fontsize=18)
+    ax.grid(True, alpha=0.35)
+    return fig
+
+
+def plot_reaction_profile(x, z):
+    z = np.asarray(z, dtype=float)
+    x = np.asarray(x, dtype=float)
+    order = np.argsort(z)
+    z = z[order]
+    x = x[order]
+
+    fig, ax = plt.subplots(figsize=(7, 9))
+    ax.plot(x, z, lw=2.2)
+    ax.set_ylim(max(z) + 1.0, -1.0)
+    ax.set_ylabel("Depth z (m)")
+    ax.set_xlabel("Reaction Rx (kN)")
+    ax.set_title("Spring reaction profile", fontsize=18)
+    ax.grid(True, alpha=0.35)
+    return fig
+
+
+def plot_moment_profile(x, z):
+    z = np.asarray(z, dtype=float)
+    x = np.asarray(x, dtype=float)
+    order = np.argsort(z)
+    z = z[order]
+    x = x[order]
+
+    fig, ax = plt.subplots(figsize=(7, 9))
+    ax.plot(x, z, lw=2.2)
+    ax.set_ylim(max(z) + 1.0, -1.0)
+    ax.set_ylabel("Depth z (m)")
+    ax.set_xlabel("My (kN.m)")
+    ax.set_title("Bending moment profile", fontsize=18)
+    ax.grid(True, alpha=0.35)
+    return fig
+
+
+def plot_shear_profile(x, z):
+    z = np.asarray(z, dtype=float)
+    x = np.asarray(x, dtype=float)
+    order = np.argsort(z)
+    z = z[order]
+    x = x[order]
+
+    fig, ax = plt.subplots(figsize=(7, 9))
+    ax.plot(x, z, lw=2.2)
+    ax.set_ylim(max(z) + 1.0, -1.0)
+    ax.set_ylabel("Depth z (m)")
+    ax.set_xlabel("Fx (kN)")
+    ax.set_title("Shear profile", fontsize=18)
     ax.grid(True, alpha=0.35)
     return fig
 
@@ -540,11 +591,11 @@ if run_clicked and OPENSEES_AVAILABLE:
 
             p1, p2 = st.columns(2)
             with p1:
-                st.pyplot(plot_profile(node_plot["ux"].values, node_plot["z"].values, "ux (m)", "Lateral displacement"))
-                st.pyplot(plot_profile(spring_plot["Rx"].values, spring_plot["z"].values, "Reaction Rx (kN)", "Spring reaction profile"))
+                st.pyplot(plot_displacement_profile(node_plot["ux"].values, node_plot["z"].values))
+                st.pyplot(plot_reaction_profile(spring_plot["Rx"].values, spring_plot["z"].values))
             with p2:
-                st.pyplot(plot_profile(moment_y, z_ele, "My (kN.m)", "Bending moment profile"))
-                st.pyplot(plot_profile(shear_x, z_ele, "Fx (kN)", "Shear profile"))
+                st.pyplot(plot_moment_profile(moment_y, z_ele))
+                st.pyplot(plot_shear_profile(shear_x, z_ele))
 
             st.subheader("Pile node results")
             st.dataframe(node_df, use_container_width=True)
