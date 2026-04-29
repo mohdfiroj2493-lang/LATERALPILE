@@ -294,7 +294,14 @@ def build_and_run_model(params: Dict[str, float]):
 
     op.geomTransf('Linear', 1, 0.0, -1.0, 0.0)
 
-    op.fix(200 + nNodePile, 0, 1, 0, 1, 0, 1)
+    # pile head boundary condition
+    if params["head_condition"] == "fixed":
+        # restrain lateral translation and rotation about global Y at the head
+        op.fix(200 + nNodePile, 1, 1, 0, 1, 1, 1)
+    else:
+        # free head in lateral translation and rotation about global Y
+        op.fix(200 + nNodePile, 0, 1, 0, 1, 0, 1)
+
     for i in range(201, 200 + nNodePile):
         op.fix(i, 0, 1, 0, 1, 0, 1)
 
@@ -327,7 +334,8 @@ def build_and_run_model(params: Dict[str, float]):
     values = [0.0, 0.0, 1.0, 1.0]
     time = [0.0, 10.0, 20.0, 10000.0]
     nodeTag = 200 + nNodePile
-    loadValues = [params["head_load_x"], 0.0, 0.0, 0.0, 0.0, 0.0]
+    # load vector for 3D beam-column node: Fx, Fy, Fz, Mx, My, Mz
+    loadValues = [params["head_load_x"], 0.0, 0.0, 0.0, params["head_moment"], 0.0]
     op.timeSeries('Path', 1, '-values', *values, '-time', *time, '-factor', 1.0)
     op.pattern('Plain', 10, 1)
     op.load(nodeTag, *loadValues)
@@ -533,6 +541,10 @@ Iy = st.sidebar.number_input("Iy", value=0.049, step=0.001)
 G = st.sidebar.number_input("G", value=9615385.0, step=1e6, format="%.6e")
 J = st.sidebar.number_input("J", value=0.098, step=0.001)
 
+st.sidebar.header("Head Boundary Condition")
+head_condition = st.sidebar.selectbox("Top of pile", ["free", "fixed"], index=0)
+head_moment = st.sidebar.number_input("Head moment My (kN.m)", value=0.0, step=10.0)
+
 st.sidebar.header("Loading and Analysis")
 head_load_x = st.sidebar.number_input("Head load in x-direction (kN)", value=3500.0, step=100.0)
 load_increment = st.sidebar.number_input("LoadControl increment", value=0.05, step=0.01, format="%.3f")
@@ -556,6 +568,8 @@ params = {
     "G": float(G),
     "J": float(J),
     "head_load_x": float(head_load_x),
+    "head_moment": float(head_moment),
+    "head_condition": str(head_condition),
     "load_increment": float(load_increment),
     "n_steps": int(n_steps),
 }
