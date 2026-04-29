@@ -575,7 +575,7 @@ with col_add1:
 updated_layers = []
 # Soil type selection added: 1 = clay, 2 = sand
 for i, layer in enumerate(st.session_state.soil_layers):
-    with st.expander(f"Soil Layer {i+1}", expanded=True):, expanded=True):
+    with st.expander(f"Soil Layer {i+1}", expanded=True):
         c1, c2, c3 = st.columns(3)
         name = c1.text_input("Name", value=layer.get("name", f"Layer {i+1}"), key=f"lname_{i}")
         z_top = c2.number_input("z_top (m)", value=float(layer.get("z_top", 0.0)), step=0.5, key=f"ztop_{i}")
